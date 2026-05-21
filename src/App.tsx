@@ -58,8 +58,36 @@ export default function App() {
     }
   }, [profileId, cellSize, marginCells, sendText, payloadType, fileData]);
 
+  // 🔄 送信側の選択的再送/強制ホールドリストの同期制御！✨
+  useEffect(() => {
+    if (!encoder) return;
+    if (selectiveNackListStr.trim() !== "") {
+      const parts = selectiveNackListStr.split(",").map(x => parseInt(x.trim(), 10)).filter(x => !isNaN(x));
+      if (parts.length > 0) {
+        if (parts.length === 1) {
+          encoder.forceChunkList = null;
+          encoder.forceChunkIndex = parts[0];
+          setCurrentTxIndex(parts[0]);
+        } else {
+          encoder.forceChunkIndex = null;
+          encoder.forceChunkList = parts;
+          setCurrentTxIndex(parts[0]);
+        }
+      } else {
+        encoder.forceChunkIndex = null;
+        encoder.forceChunkList = null;
+      }
+    } else {
+      encoder.forceChunkIndex = null;
+      encoder.forceChunkList = null;
+    }
+  }, [selectiveNackListStr, encoder]);
+
   const updateEncData = () => {
     if (!encoder) return;
+    encoder.forceChunkIndex = null;
+    encoder.forceChunkList = null;
+    setSelectiveNackListStr(""); // データを変更した時は自動的に再送対象をクリアするよ！✨
     if (payloadType === "text") {
       const data = new TextEncoder().encode(sendText);
       const meta: PayloadMeta = { type: "text" };
@@ -85,6 +113,8 @@ export default function App() {
 
   const toggleStreaming = () => {
     if (!encoder) return;
+    encoder.forceChunkIndex = null;
+    encoder.forceChunkList = null;
     if (isStreaming) {
       encoder.stopStreaming();
     } else {
@@ -102,14 +132,44 @@ export default function App() {
   const [decPayload, setDecPayload] = useState<Uint8Array | null>(null);
   const [debugInfo, setDebugInfo] = useState<DecodeDebugInfo | null>(null);
   const [chunksReceived, setChunksReceived] = useState<Record<number, Uint8Array>>({});
-  const [awaitingChunkIndex, setAwaitingChunkIndex] = useState(0); // 💖 絶賛待機中のターゲット・チャンク！
   const [totalRxChunks, setTotalRxChunks] = useState(1); // デコード時にヘッダから自動取得するよお！
   const decoderRef = useRef(new ColorGridDecoder());
+
+  // 🔄 双方向インタラクティブ同期モード（Interactive Feedback Sync）用の鬼ヤバパラメータたち！💖
+  const [interactiveModeTx, setInteractiveModeTx] = useState(false); // 送信側
+  const [interactiveModeRx, setInteractiveModeRx] = useState(false); // 受信側
+  const [isAckCameraOn, setIsAckCameraOn] = useState(false); // 送信側のACK監視カメラ稼働
+  const [ackDebugInfo, setAckDebugInfo] = useState<DecodeDebugInfo | null>(null); // ACK監視カメラ用デバッグ
+  const [isAckConnected, setIsAckConnected] = useState(false); // 相手のフィードバックコードを捉えているか！🔗✨
+  const [ackMsg, setAckMsg] = useState(""); // デコードされた相手からの要求メッセージ
+  const [selectiveNackListStr, setSelectiveNackListStr] = useState(""); // 送信側が独自（ARQ無効時など）にループ再送するためのチャンクリスト(CSV)だよ！💖
+  const [showNackFeedbackRx, setShowNackFeedbackRx] = useState(false); // 受信側がARQ無効でも欠落チャンクリストコードを逆送信(1枚表示)したい時のトグル！✨
+
+  // 双方向制御用Refs! 🛠
+  const ackVideoRef = useRef<HTMLVideoElement>(null);
+  const ackCanvasRef = useRef<HTMLCanvasElement>(null);
+  const feedbackCanvasRef = useRef<HTMLCanvasElement>(null);
+  const feedbackEncoderRef = useRef<ColorGridEncoder | null>(null);
+  const ackDecoderRef = useRef(new ColorGridDecoder());
+
+  // 💖 絶賛待機中のターゲット・チャンクを chunksReceived の状況からリアルタイムで神検出するよ！✨
+  const awaitingChunkIndex = (() => {
+    const keysCount = Object.keys(chunksReceived).length;
+    if (keysCount === 0) return 0;
+    for (let i = 0; i < totalRxChunks; i++) {
+      if (chunksReceived[i] === undefined) {
+        return i;
+      }
+    }
+    return totalRxChunks;
+  })();
+
+  // 💖 全てのチャンクが余すことなく揃ったかを厳格に判定するよ！✨
+  const isAllChunksRecovered = Object.keys(chunksReceived).length > 0 && Object.keys(chunksReceived).length === totalRxChunks;
 
   // 受信バッファなどを初期化するリセッターだよ！✨
   const resetReceiver = () => {
     setChunksReceived({});
-    setAwaitingChunkIndex(0);
     setDecOutputText("");
     setDecPayload(null);
     setTotalRxChunks(1);
@@ -134,13 +194,56 @@ export default function App() {
     }
   };
 
-  const stopCamera = () => {
+   const stopCamera = () => {
     if (videoRef.current && videoRef.current.srcObject) {
       const stream = videoRef.current.srcObject as MediaStream;
       stream.getTracks().forEach(t => t.stop());
       videoRef.current.srcObject = null;
     }
     setIsCameraOn(false);
+  };
+
+  // 🔄 送信側のACKフィードバック監視カメラの起動・終了ロジックだよ！✨
+  const startAckCamera = async () => {
+    setAckMsg("");
+    setIsAckConnected(false);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 } }
+      });
+      if (ackVideoRef.current) {
+        ackVideoRef.current.srcObject = stream;
+        setIsAckCameraOn(true);
+      }
+    } catch (e) {
+      console.warn("ACK Camera initial failed, trying front/any:", e);
+      // メインの背面カメラがダメだったら、一般条件でフォールバック
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 640 }, height: { ideal: 480 } }
+        });
+        if (ackVideoRef.current) {
+          ackVideoRef.current.srcObject = stream;
+          setIsAckCameraOn(true);
+        }
+      } catch (err) {
+        setTestResult({
+          ok: false,
+          title: "ACK Camera Error",
+          details: "ACK監視カメラの起動に失敗したみ😭\n" + String(err)
+        });
+      }
+    }
+  };
+
+  const stopAckCamera = () => {
+    if (ackVideoRef.current && ackVideoRef.current.srcObject) {
+      const stream = ackVideoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(t => t.stop());
+      ackVideoRef.current.srcObject = null;
+    }
+    setIsAckCameraOn(false);
+    setIsAckConnected(false);
   };
 
   useEffect(() => {
@@ -198,39 +301,29 @@ export default function App() {
                   setChunksReceived(prev => {
                     const next = { ...prev, [chunkIndex]: payload };
                     
-                    // 全部揃ったかの簡易確認
-                    if (Object.keys(next).length >= totalChunks) {
+                    // 全てのチャンクが漏れなく揃っているか厳密にチェックして自動結合するよ！🧩💖
+                    let allMatched = true;
+                    for (let i = 0; i < totalChunks; i++) {
+                      if (next[i] === undefined) {
+                        allMatched = false;
+                        break;
+                      }
+                    }
+
+                    if (allMatched) {
                        let totalLen = 0;
                        for (let i = 0; i < totalChunks; i++) {
-                         if (next[i]) totalLen += next[i].length;
+                         totalLen += next[i].length;
                        }
                        const resultData = new Uint8Array(totalLen);
                        let offset = 0;
                        for (let i = 0; i < totalChunks; i++) {
-                         if (next[i]) {
-                           resultData.set(next[i], offset);
-                           offset += next[i].length;
-                         }
+                         resultData.set(next[i], offset);
+                         offset += next[i].length;
                        }
                        setDecPayload(resultData);
                        setDecOutputText(new TextDecoder().decode(resultData));
                     }
-
-                    // 💖 1回でも該当チャンクの受信に成功したら次のチャンクを待機するようにシフトするよ！✨
-                    setAwaitingChunkIndex(currentAwaiting => {
-                       // 今受信した chunkIndex が現在の待機対象だった場合、もしくは既に受信済みの場合
-                       if (next[currentAwaiting]) {
-                          // 次の未受信の最小インデックスを探してそこを新しい待機対象にする！
-                          for (let i = currentAwaiting + 1; i < totalChunks; i++) {
-                             if (!next[i]) return i;
-                          }
-                          for (let i = 0; i < totalChunks; i++) {
-                             if (!next[i]) return i;
-                          }
-                          return totalChunks; // 全部揃ったら totalChunks (完了) にセット！
-                       }
-                       return currentAwaiting; // まだ期待のチャンクが来ていなければ待機を維持
-                    });
 
                     return next;
                   });
@@ -244,6 +337,163 @@ export default function App() {
     if (isCameraOn) reqId = requestAnimationFrame(processFrame);
     return () => cancelAnimationFrame(reqId);
   }, [isCameraOn]);
+
+
+  // 🔄 送信側のACKフィードバックデコードの超リアルタイムループ！🔗✨
+  useEffect(() => {
+    let reqId: number;
+    const processAckFrame = () => {
+      if (isAckCameraOn && ackVideoRef.current && ackCanvasRef.current) {
+        const video = ackVideoRef.current;
+        const canvas = ackCanvasRef.current;
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const ctx = canvas.getContext("2d");
+          if (ctx) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // オフスクリーンにコピー
+            const offscreenCanvas = document.createElement('canvas');
+            offscreenCanvas.width = video.videoWidth;
+            offscreenCanvas.height = video.videoHeight;
+            const oCtx = offscreenCanvas.getContext("2d");
+            if (oCtx) {
+              oCtx.drawImage(video, 0, 0);
+              const imageData = oCtx.getImageData(0, 0, video.videoWidth, video.videoHeight);
+              const res = ackDecoderRef.current.decodeFrame(imageData);
+              setAckDebugInfo(res.debug || null);
+              
+              if (res.debug) {
+                setIsAckConnected(true);
+                // オーバーレイ描画はシアンブルーでハイライトしてハッカー感を演出するよ！💎
+                if (res.debug.corners) {
+                  ctx.strokeStyle = '#22d3ee';
+                  ctx.lineWidth = 2.5;
+                  ctx.beginPath();
+                  const pts = res.debug.corners;
+                  ctx.moveTo(pts[0].x, pts[0].y);
+                  ctx.lineTo(pts[1].x, pts[1].y);
+                  ctx.lineTo(pts[2].x, pts[2].y);
+                  ctx.lineTo(pts[3].x, pts[3].y);
+                  ctx.closePath();
+                  ctx.stroke();
+                }
+              } else {
+                setIsAckConnected(false);
+              }
+              
+              if (res.ok && res.chunk) {
+                const text = new TextDecoder().decode(res.chunk.payload);
+                setAckMsg(text);
+                
+                // コマンド判定！ "F:X" または "F:DONE" または "F:X,Y,Z..." だよお！
+                if (text.startsWith("F:")) {
+                  const cmd = text.slice(2);
+                  if (cmd === "DONE") {
+                    // お疲れ様でした！完璧完了！💖
+                    if (encoder) {
+                      encoder.forceChunkIndex = null;
+                      encoder.forceChunkList = null;
+                      encoder.stopStreaming();
+                    }
+                    setIsStreaming(false);
+                    setTestResult({
+                      ok: true,
+                      title: "🎉 双方向超高速データ転送完了！ 💮",
+                      details: `おめでとう！カメラ対向フィードバックにより、受信側の全チャンク完全回収が完了したよ！🥺💖✨\n\n[確認メッセージ]: ${text}\nインジケータもDONEになったため、送信を安全に停止したよ！`
+                    });
+                    stopAckCamera(); // カメラおしまい！
+                  } else {
+                    // 欠落しているチャンク番号リスト（カンマ区切り）をパースするみ！✨
+                    const parts = cmd.split(",").map(x => parseInt(x.trim(), 10)).filter(x => !isNaN(x));
+                    if (parts.length > 0) {
+                      // 状態変数に同期するだけで、連動 useEffect によって一括で処理されるみ！💖
+                      setSelectiveNackListStr(parts.join(","));
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      reqId = requestAnimationFrame(processAckFrame);
+    };
+    if (isAckCameraOn) reqId = requestAnimationFrame(processAckFrame);
+    return () => cancelAnimationFrame(reqId);
+  }, [isAckCameraOn, encoder]);
+
+
+  // 🔄 受信側の「私の現在要求＆欠落チャンクリスト」フィードバックエンコーダの初期化とストリーミング管理！🎨✨
+  useEffect(() => {
+    const isFeedbackActive = interactiveModeRx || showNackFeedbackRx;
+    if (isFeedbackActive && feedbackCanvasRef.current) {
+      const fCanvas = feedbackCanvasRef.current;
+      // フィードバック用に超小型 Micro(XS) の ColorGridEncoder インスタンスを作成するよ！
+      const fEncoder = new ColorGridEncoder(fCanvas, {
+        profileId: "XS",
+        cellSize: 3.5, // 相手のカメラが読みやすくて可愛いサイズ！3.5px！
+        marginCells: 1,
+        fps: 8 // クロックのチカチカ変化を安定して追従させやすくなるように 8fps！
+      });
+      feedbackEncoderRef.current = fEncoder;
+      
+      const missing: number[] = [];
+      for (let i = 0; i < totalRxChunks; i++) {
+        if (chunksReceived[i] === undefined) {
+          missing.push(i);
+        }
+      }
+      
+      // ARQかつNACK非表示なら、送信者の受信完了を完全に待つため「単一の最小未受信インデックス」をStop-and-Wait要求！🎯
+      // ARQ無効 or 明示的にNACKトグルがONなら、欠落をまとめて1枚で逆送り！💖
+      let payloadStr = "F:DONE";
+      if (!isAllChunksRecovered) {
+        if (showNackFeedbackRx) {
+          payloadStr = "F:" + missing.slice(0, 15).join(",");
+        } else {
+          payloadStr = `F:${awaitingChunkIndex}`;
+        }
+      }
+      
+      const payloadBytes = new TextEncoder().encode(payloadStr);
+      fEncoder.setData(payloadBytes, { type: "text" });
+      
+      fEncoder.startStreaming(8); // 点灯開始！
+      
+      return () => {
+        fEncoder.stopStreaming();
+        feedbackEncoderRef.current = null;
+      };
+    }
+  }, [interactiveModeRx, showNackFeedbackRx]);
+
+  // 🔄 受信データの状況が更新されたら、ストリーミングはそのままでデータだけ超高速で差し替えるよ！🚀✨
+  useEffect(() => {
+    const isFeedbackActive = interactiveModeRx || showNackFeedbackRx;
+    if (isFeedbackActive && feedbackEncoderRef.current) {
+      const fEncoder = feedbackEncoderRef.current;
+      const missing: number[] = [];
+      for (let i = 0; i < totalRxChunks; i++) {
+        if (chunksReceived[i] === undefined) {
+          missing.push(i);
+        }
+      }
+      
+      let payloadStr = "F:DONE";
+      if (!isAllChunksRecovered) {
+        if (showNackFeedbackRx) {
+          payloadStr = "F:" + missing.slice(0, 15).join(",");
+        } else {
+          payloadStr = `F:${awaitingChunkIndex}`;
+        }
+      }
+      
+      const payloadBytes = new TextEncoder().encode(payloadStr);
+      fEncoder.setData(payloadBytes, { type: "text" });
+    }
+  }, [interactiveModeRx, showNackFeedbackRx, chunksReceived, totalRxChunks, isAllChunksRecovered, awaitingChunkIndex]);
 
 
   // ================= SELF TEST =================
@@ -461,6 +711,135 @@ export default function App() {
                       <input type="number" className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={fps} onChange={e => setFps(Number(e.target.value))} />
                     </div>
                   </div>
+
+                  {/* 📊 1フレーム実効容量のリアルタイム神算出パネル 📊 */}
+                  <div className="p-3 bg-black/60 rounded-lg border border-[#2d333d] flex flex-col gap-1.5 text-[10px] font-mono shrink-0">
+                    <div className="text-gray-500 font-bold uppercase flex justify-between">
+                      <span>📦 {t.profile} FRAME ANALYSIS</span>
+                      <span className="text-cyan-400 font-bold">{profileId} PROFILE</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 mt-1 py-1.5 border-y border-[#2d333d]/40">
+                      <div className="flex flex-col">
+                        <span className="text-gray-500 font-bold uppercase text-[8px]">{t.capData}</span>
+                        <span className="text-white font-bold text-xs mt-0.5">
+                          {profileId === "XS" ? "471 B" : profileId === "S" ? "2,228 B" : profileId === "M" ? "4,212 B" : profileId === "L" ? "6,134 B" : "9,219 B"}
+                        </span>
+                      </div>
+                      <div className="flex flex-col border-x border-[#2d333d]/40 px-2">
+                        <span className="text-gray-500 font-bold uppercase text-[8px]">{t.capParity}</span>
+                        <span className="text-gray-400 text-xs mt-0.5">
+                          {profileId === "XS" ? "118 B" : profileId === "S" ? "557 B" : profileId === "M" ? "1,053 B" : profileId === "L" ? "1,534 B" : "2,305 B"}
+                        </span>
+                      </div>
+                      <div className="flex flex-col pl-1">
+                        <span className="text-gray-500 font-bold uppercase text-[8px]">{t.capTotal}</span>
+                        <span className="text-cyan-300 font-bold text-xs mt-0.5">
+                          {profileId === "XS" ? "589 B" : profileId === "S" ? "2,785 B" : profileId === "M" ? "5,265 B" : profileId === "L" ? "7,668 B" : "11,524 B"}
+                        </span>
+                      </div>
+                    </div>
+                    <span className="text-[9px] text-[#22c55e]/90 leading-relaxed pt-0.5">※ 約25%のReed-Solomon誤り訂正込みで完璧な耐ノイズ性能を発揮するよ！💖</span>
+                  </div>
+
+                  {/* 🧩 選択的再送ループ (CSV形式) 制御 🧩 */}
+                  <div className="mt-3 border-t border-[#2d333d]/65 pt-3 flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-yellow-500 uppercase tracking-wider">🎯 Selective Repeat / ホールド再送</span>
+                      {selectiveNackListStr && (
+                        <button
+                          onClick={() => setSelectiveNackListStr("")}
+                          className="text-[9px] font-black text-gray-400 hover:text-white px-2 py-0.5 bg-[#2d333d] rounded cursor-pointer transition-colors"
+                        >
+                          クリア
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[9px] text-gray-500 leading-normal">
+                      受信側で欠落した特定のチャンク番号（例: <code className="text-pink-400 bg-black/40 px-1 rounded">2,3</code>）だけを絞り込んで無限ローテーション放流する凄腕モード！双方向同期(ARQ)での自動検知、または下への手入力で起動するよ！💖
+                    </p>
+                    <div className="flex gap-2 mt-0.5">
+                      <input
+                        type="text"
+                        className="bg-[#1c2128] border border-[#374151] rounded px-3 py-1.5 text-xs text-white placeholder-gray-500 focus:border-yellow-500 outline-none flex-1 font-mono"
+                        placeholder="例: 2, 3 (カンマ区切り)"
+                        value={selectiveNackListStr}
+                        onChange={(e) => setSelectiveNackListStr(e.target.value)}
+                      />
+                    </div>
+                    {selectiveNackListStr && (
+                      <div className="text-[9px] font-mono text-yellow-400 flex items-center gap-1.5 bg-yellow-950/20 border border-yellow-800/40 px-2 py-1.2 rounded">
+                        <span className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-ping" />
+                        <span>{selectiveNackListStr.split(",").length > 1 ? "【選択的再送ループ中】欠落チャンクのみをチカチカ自動ローテーション中！" : "【チャンク固定中】特定の１枚で点滅を固定しているよ！🎯"}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 🔄 双方向インタラクティブ同期 (Feedback ARQ Loop) 制御 🔄 */}
+                  <div className="mt-4 border-t border-[#2d333d]/60 pt-3 flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-gray-500 uppercase">FEEDBACK LOOP (ARQ)</span>
+                      <label className="relative inline-flex items-center cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={interactiveModeTx} 
+                          onChange={(e) => {
+                            const val = e.target.checked;
+                            setInteractiveModeTx(val);
+                            if (val) {
+                              startAckCamera();
+                            } else {
+                              stopAckCamera();
+                              if (encoder) {
+                                encoder.forceChunkIndex = null;
+                              }
+                            }
+                          }} 
+                          className="sr-only peer" 
+                        />
+                        <div className="w-9 h-5 bg-[#1c2128] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-400 after:border-gray-300 after:border peer-checked:bg-cyan-500 peer-checked:after:bg-white border border-[#374151]" />
+                        <span className="ml-2 text-xs font-bold text-gray-300 select-none cursor-pointer">{t.interactiveSync}</span>
+                      </label>
+                    </div>
+                    <p className="text-[10px] text-gray-500 leading-normal">{t.interactiveSyncDesc}</p>
+                    
+                    {/* ACK監視カメラ用のライブプレビュー窓💖 */}
+                    {isAckCameraOn && (
+                      <div className="mt-2 bg-black/60 rounded-lg p-2 border border-[#2d333d] flex flex-col gap-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[9px] font-mono text-cyan-400 flex items-center gap-1.5">
+                            <span className={`w-1.5 h-1.5 rounded-full ${isAckConnected ? "bg-[#22c55e] animate-pulse shadow-[0_0_8px_#22c55e]" : "bg-cyan-400 shadow-[0_0_8px_#22d3ee] animate-ping"}`} />
+                            {isAckConnected ? "FEEDBACK CODE LOCKED 🔒" : "ALIGNING WITH RECEIVER..."}
+                          </span>
+                          {ackMsg && (
+                            <span className="text-[9px] font-mono bg-cyan-950/60 text-cyan-300 border border-cyan-800/80 px-1.5 py-0.5 rounded shadow-inner">
+                              REQUEST: {ackMsg}
+                            </span>
+                          )}
+                        </div>
+                        
+                        <div className="relative aspect-video max-h-32 bg-gray-950/80 rounded overflow-hidden flex items-center justify-center border border-[#1c2128]">
+                          <video
+                            ref={ackVideoRef}
+                            autoPlay
+                            playsInline
+                            muted
+                            className="absolute inset-0 w-full h-full object-cover opacity-60 scale-x-[-1]"
+                          />
+                          <canvas
+                            ref={ackCanvasRef}
+                            className="absolute inset-0 w-full h-full object-cover z-10 pointer-events-none scale-x-[-1]"
+                          />
+                          {!isAckConnected && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-20 pointer-events-none">
+                              <div className="text-[9px] font-mono text-cyan-400/80 animate-pulse text-center leading-relaxed">
+                                相手の画面の「フィードバックコード」を<br/>カメラに写して同期してね！🔗
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="mt-4 shrink-0">
@@ -479,99 +858,148 @@ export default function App() {
 
             {/* Right: Encoder Canvas output */}
             <section className={`bg-[#15181e] flex flex-col p-4 relative ${isMaximized ? "border-0 rounded-none h-full w-full" : "rounded-xl border border-[#2d333d] h-[400px] lg:h-full"}`}>
-              <div className="flex items-center justify-between mb-3 shrink-0 gap-2 flex-wrap">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[10px] font-bold text-gray-500 uppercase pt-1">{t.matrixOutput}</span>
-                  {isStreaming && (
-                    <span className="text-[9px] font-mono bg-red-900/60 text-red-400 border border-red-800 px-1.5 py-0.5 uppercase animate-pulse rounded">
-                      TX_ACTIVE
+                <div className="flex items-center justify-between mb-3 shrink-0 gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase pt-1">{t.matrixOutput}</span>
+                    {isStreaming && (
+                      <span className="text-[9px] font-mono bg-red-900/60 text-red-400 border border-red-800 px-1.5 py-0.5 uppercase animate-pulse rounded">
+                        TX_ACTIVE
+                      </span>
+                    )}
+                    <span className="text-[9px] font-mono bg-[#15181e] px-1.5 py-0.5 text-cyan-300 border border-cyan-800 rounded">
+                      {t.chunks}: {encStats.totalChunks}
                     </span>
-                  )}
-                  <span className="text-[9px] font-mono bg-[#15181e] px-1.5 py-0.5 text-cyan-300 border border-cyan-800 rounded">
-                    {t.chunks}: {encStats.totalChunks}
-                  </span>
-                  {isStreaming && (
-                    <>
-                      <span className="text-[9px] font-mono bg-yellow-950/40 text-yellow-400 border border-yellow-800/80 px-1.5 py-0.5 rounded animate-pulse">
-                        TX_CHUNK: {currentTxIndex} / {encStats.totalChunks - 1} (REMAIN: {encStats.totalChunks - currentTxIndex - 1})
-                      </span>
-                      <span className="text-[9px] font-mono bg-[#15181e] px-1.5 py-0.5 text-green-400 border border-green-800 rounded">
-                        {t.fpsTarget}: {fps}
-                      </span>
-                    </>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={toggleStreaming}
-                    className={`px-3 py-1 bg-[#2d333d] hover:bg-[#374151] rounded text-[10px] font-bold transition-all border border-[#4b5563] cursor-pointer
-                      ${isStreaming 
-                        ? "bg-red-950/40 hover:bg-red-900/60 text-red-400 border-red-800/80 shadow-[0_0_10px_rgba(239,68,68,0.15)] animate-pulse" 
-                        : "bg-green-950/30 hover:bg-green-900/55 text-green-400 border-green-800/80 shadow-[0_0_10px_rgba(34,197,94,0.15)]"}`}
-                  >
-                    {isStreaming ? t.stopTransmission : t.startTransmission}
-                  </button>
-                  <button
-                    onClick={handleSaveImage}
-                    className="px-3 py-1 bg-[#2d333d] hover:bg-[#374151] rounded text-[10px] font-bold text-gray-300 transition-colors border border-[#4b5563] cursor-pointer"
-                  >
-                    {t.saveImage}
-                  </button>
-                  <button
-                    onClick={() => setIsMaximized(!isMaximized)}
-                    className="px-3 py-1 bg-[#1a2d3d] hover:bg-[#203a4f] text-cyan-400 rounded text-[10px] font-bold border border-cyan-800/80 flex items-center gap-1.5 shadow-md cursor-pointer"
-                    title={isMaximized ? t.normalMode : t.theaterMode}
-                  >
-                    {isMaximized ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
-                    <span>{isMaximized ? t.normalMode : t.theaterMode}</span>
-                  </button>
-                </div>
-              </div>
-              
-              <div className="flex-1 bg-black rounded border border-[#2d333d] flex items-center justify-center p-2 relative group overflow-hidden">
-                <canvas ref={encCanvasRef} className="max-w-full max-h-full object-contain relative z-0" style={{ imageRendering: 'pixelated' }}></canvas>
-              </div>
-            </section>
-          </div>
-        )}
-
-        {mode === "RECEIVE" && (
-          <div className="grid lg:grid-cols-2 gap-4 h-auto lg:h-full lg:min-h-0">
-            {/* Left: Decoder Camera Feed */}
-            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-[450px] lg:h-full overflow-hidden shrink-0 lg:shrink">
-              <div className="flex items-center justify-between mb-3 shrink-0">
-                <span className="text-[10px] font-bold text-pink-400 tracking-widest">{t.decoderTitle}</span>
-                <span className="text-[10px] font-mono text-gray-500 uppercase">Camera: {isCameraOn ? t.cameraActive : t.cameraInactive}</span>
-              </div>
-
-              <div className="flex-1 bg-black rounded border border-[#2d333d] overflow-hidden relative flex flex-col items-center justify-center min-h-[250px]">
-                {!isCameraOn && (
-                  <div className="text-gray-600 font-mono text-xs flex items-center gap-2">
-                    <span className="w-2 h-2 bg-gray-600 rounded-full"></span> {t.camOffline}
+                    {isStreaming && (
+                      <>
+                        <span className="text-[9px] font-mono bg-yellow-950/40 text-yellow-400 border border-yellow-800/80 px-1.5 py-0.5 rounded animate-pulse">
+                          TX_CHUNK: {currentTxIndex} / {encStats.totalChunks - 1} (REMAIN: {encStats.totalChunks - currentTxIndex - 1})
+                        </span>
+                        <span className="text-[9px] font-mono bg-[#15181e] px-1.5 py-0.5 text-green-400 border border-green-800 rounded">
+                          {t.fpsTarget}: {fps}
+                        </span>
+                      </>
+                    )}
                   </div>
-                )}
-                <video ref={videoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover opacity-80"></video>
-                <canvas ref={decCanvasRef} className="absolute inset-0 w-full h-full object-cover pointer-events-none z-10"></canvas>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleSaveImage}
+                      className="px-3 py-1 bg-[#2d333d] hover:bg-[#374151] rounded text-[10px] font-bold text-gray-300 transition-colors border border-[#4b5563] cursor-pointer"
+                    >
+                      {t.saveImage}
+                    </button>
+                    <button
+                      onClick={() => setIsMaximized(!isMaximized)}
+                      className="px-3 py-1 bg-[#1a2d3d] hover:bg-[#203a4f] text-cyan-400 rounded text-[10px] font-bold border border-cyan-800/80 flex items-center gap-1.5 shadow-md cursor-pointer"
+                      title={isMaximized ? t.normalMode : t.theaterMode}
+                    >
+                      {isMaximized ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                      <span>{isMaximized ? t.normalMode : t.theaterMode}</span>
+                    </button>
+                  </div>
+                </div>
                 
-                {isCameraOn && <div className="absolute top-4 left-4 flex flex-col gap-1 z-20">
-                  <div className={`text-[9px] font-mono px-2 py-0.5 uppercase border ${debugInfo?.detectedProfileId ? 'bg-pink-900/60 text-pink-200 border-pink-700' : 'bg-black/60 text-gray-400 border-gray-700'}`}>
-                    Sync: {debugInfo?.detectedProfileId ? t.syncLocked : t.syncSearching}
-                  </div>
-                </div>}
-              </div>
+                <div className="flex-1 bg-black rounded border border-[#2d333d] flex items-center justify-center p-2 relative group overflow-hidden">
+                  <canvas ref={encCanvasRef} className="max-w-full max-h-full object-contain relative z-0" style={{ imageRendering: 'pixelated' }}></canvas>
+                </div>
+              </section>
+            </div>
+          )}
 
-              <div className="mt-4 shrink-0">
-                <button 
-                  onClick={isCameraOn ? stopCamera : startCamera} 
-                  className={`w-full py-3 text-xs font-bold rounded uppercase tracking-widest transition-all
-                    ${isCameraOn 
-                      ? "bg-red-600/10 border border-red-600/50 text-red-500 hover:bg-red-600/20" 
-                      : "bg-pink-600/10 border border-pink-600/50 text-pink-500 hover:bg-pink-600/20 shadow-[0_0_10px_rgba(236,72,153,0.2)]"}`}
-                >
-                  {isCameraOn ? t.termScanner : t.initScanner}
-                </button>
-              </div>
-            </section>
+          {mode === "RECEIVE" && (
+            <div className="grid lg:grid-cols-2 gap-4 h-auto lg:h-full lg:min-h-0">
+              {/* Left: Decoder Camera Feed */}
+              <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-[450px] lg:h-full overflow-hidden shrink-0 lg:shrink">
+                <div className="flex items-center justify-between mb-3 shrink-0">
+                  <span className="text-[10px] font-bold text-pink-400 tracking-widest">{t.decoderTitle}</span>
+                  <span className="text-[10px] font-mono text-gray-500 uppercase">Camera: {isCameraOn ? t.cameraActive : t.cameraInactive}</span>
+                </div>
+
+                <div className="flex-1 bg-black rounded border border-[#2d333d] overflow-hidden relative flex flex-col items-center justify-center min-h-[250px]">
+                  {!isCameraOn && (
+                    <div className="text-gray-600 font-mono text-xs flex items-center gap-2">
+                      <span className="w-2 h-2 bg-gray-600 rounded-full"></span> {t.camOffline}
+                    </div>
+                  )}
+                  <video ref={videoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover opacity-80"></video>
+                  <canvas ref={decCanvasRef} className="absolute inset-0 w-full h-full object-cover pointer-events-none z-10"></canvas>
+                  
+                  {isCameraOn && <div className="absolute top-4 left-4 flex flex-col gap-1 z-20">
+                    <div className={`text-[9px] font-mono px-2 py-0.5 uppercase border ${debugInfo?.detectedProfileId ? 'bg-pink-900/60 text-pink-200 border-pink-700' : 'bg-black/60 text-gray-400 border-gray-700'}`}>
+                      Sync: {debugInfo?.detectedProfileId ? t.syncLocked : t.syncSearching}
+                    </div>
+                  </div>}
+
+                  {/* 🔄 フィードバックコードの Picture-in-Picture レンダラー 🔄 */}
+                  {(interactiveModeRx || showNackFeedbackRx) && (
+                    <div className="absolute bottom-4 right-4 flex flex-col items-end gap-1 z-30 p-1.5 bg-black/85 rounded-lg border border-[#2d333d] shadow-[0_0_15px_rgba(236,72,153,0.3)] animate-pulse">
+                      <span className="text-[7px] font-mono font-black text-pink-400 uppercase tracking-widest flex items-center gap-1 pb-0.5">
+                        <span className="w-1 h-1 rounded-full bg-pink-500 animate-ping inline-block" /> FEEDBACK TX
+                      </span>
+                      <canvas 
+                        ref={feedbackCanvasRef} 
+                        className="w-20 h-20 bg-white rounded border border-pink-500/40" 
+                        style={{ imageRendering: 'pixelated' }}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* 🔄 双方向フィードバック(ARQ)出力制御 🔄 */}
+                <div className="mt-4 px-1 flex flex-col gap-2 shrink-0 border-t border-[#2d333d]/60 pt-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase">FEEDBACK SENDER (RX-LOOP)</span>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input 
+                        type="checkbox" 
+                        checked={interactiveModeRx} 
+                        onChange={(e) => {
+                          const val = e.target.checked;
+                          setInteractiveModeRx(val);
+                          if (val) setShowNackFeedbackRx(false); // リアルタイム同期時は一括NACKはOFFにする
+                        }} 
+                        className="sr-only peer" 
+                      />
+                      <div className="w-9 h-5 bg-[#1c2128] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-400 after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-pink-600 peer-checked:after:bg-white border border-[#374151]" />
+                      <span className="ml-2 text-xs font-bold text-gray-300 select-none cursor-pointer">{t.interactiveSync} (ARQ同期)</span>
+                    </label>
+                  </div>
+                  <p className="text-[9px] text-gray-500 leading-normal">送信側と双方向カメラ。相手がこちらの進捗を完全に待ってステップアップする極限の安定同期モード！</p>
+
+                  {/* 🎯 ARQ無効で使える「欠落リストの一括逆送り(NACK code)」トグル 🎯 */}
+                  <div className="flex items-center justify-between mt-1 pt-1.5 border-t border-[#2d333d]/40">
+                    <span className="text-[10px] font-bold text-yellow-500 uppercase">逆方向 NACK リストコード送信</span>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input 
+                        type="checkbox" 
+                        checked={showNackFeedbackRx} 
+                        onChange={(e) => {
+                          const val = e.target.checked;
+                          setShowNackFeedbackRx(val);
+                          if (val) setInteractiveModeRx(false); // NACK一撃送り時はリアルタイムステップ同期はOFFにする
+                        }} 
+                        className="sr-only peer" 
+                      />
+                      <div className="w-9 h-5 bg-[#1c2128] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-400 after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-yellow-600 peer-checked:after:bg-white border border-[#374151]" />
+                      <span className="ml-2 text-xs font-bold text-gray-300 select-none cursor-pointer">欠落を一括逆送り (NACK)</span>
+                    </label>
+                  </div>
+                  <p className="text-[9px] text-gray-400 leading-normal">
+                    スライドショー（ARQ無効）中などに一部が欠落した時、これをONにして右下の極小(XS)フィードバックコードを送信カメラに写せば、**送信側が「欠落チャンクのみの繰り返し送信」に自動で切り替わります！**
+                  </p>
+                </div>
+
+                <div className="mt-3 shrink-0">
+                  <button 
+                    onClick={isCameraOn ? stopCamera : startCamera} 
+                    className={`w-full py-3 text-xs font-bold rounded uppercase tracking-widest transition-all
+                      ${isCameraOn 
+                        ? "bg-red-600/10 border border-red-600/50 text-red-500 hover:bg-red-600/20" 
+                        : "bg-pink-600/10 border border-pink-600/50 text-pink-500 hover:bg-pink-600/20 shadow-[0_0_10px_rgba(236,72,153,0.2)]"}`}
+                  >
+                    {isCameraOn ? t.termScanner : t.initScanner}
+                  </button>
+                </div>
+              </section>
 
             {/* Right: Decoder Outputs & Logs */}
             <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-[350px] lg:h-full">
@@ -595,10 +1023,10 @@ export default function App() {
                         {debugInfo.detectedProfileId && <div className="text-pink-400">Profile Locked: [{debugInfo.detectedProfileId}] (Size: {debugInfo.estimatedGridSize})</div>}
                         <div className="text-cyan-600">Payload CRC: {debugInfo.crcOk ? <span className="text-green-400">PASSED</span> : <span className="text-red-400">FAILED</span>}</div>
                         <div className="text-gray-300">Total Chunks Recv: {Object.keys(chunksReceived).length} / {totalRxChunks}</div>
-                        {awaitingChunkIndex < totalRxChunks ? (
-                          <div className="text-yellow-400 animate-pulse font-bold">Awaiting Target: #{awaitingChunkIndex} (Remaining: {totalRxChunks - Object.keys(chunksReceived).length})</div>
-                        ) : (
+                        {isAllChunksRecovered ? (
                           <div className="text-green-400 font-bold animate-bounce">✨ ALL CHUNKS FULLY RECOVERED! 🎉</div>
+                        ) : (
+                          <div className="text-yellow-400 animate-pulse font-bold">Awaiting Target: #{awaitingChunkIndex} (Remaining: {totalRxChunks - Object.keys(chunksReceived).length})</div>
                         )}
                       </div>
                     ) : (

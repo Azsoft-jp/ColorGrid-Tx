@@ -32,6 +32,11 @@ export class ColorGridEncoder {
   private clockState = 0; // 0 or 1
   private rs = new ReedSolomon();
   
+  // 双方向モードなどで、特定のチャンクのみをクロック変滅させながら固定放出する用のプロパティだよ！✨
+  public forceChunkIndex: number | null = null;
+  public forceChunkList: number[] | null = null;
+  private forceChunkListIndex = 0;
+  
   // 今どのチャンクを送ってるかをUIに伝えるためのコールバックだよ！✨
   public onChunkChange?: (index: number, total: number) => void;
 
@@ -250,15 +255,34 @@ export class ColorGridEncoder {
     // FPS間隔で描画更新
     const tick = () => {
       this.clockState = 1 - this.clockState;
+      
+      if (this.forceChunkList !== null && this.forceChunkList.length > 0) {
+        // 再送ローテーションモード！欠落パーツを順番に放流するよ！💥💖
+        this.forceChunkListIndex = this.forceChunkListIndex % this.forceChunkList.length;
+        this.currentChunkIndex = this.forceChunkList[this.forceChunkListIndex];
+        this.forceChunkListIndex++;
+      } else if (this.forceChunkIndex !== null) {
+        // 特定の1チャンクに強制吸着！✨
+        this.currentChunkIndex = this.forceChunkIndex;
+        if (this.currentChunkIndex >= Math.max(1, this.chunks.length)) {
+          this.currentChunkIndex = 0;
+          this.forceChunkIndex = 0;
+        }
+      }
+
       const idx = this.currentChunkIndex;
       this.renderChunk(idx);
       if (this.onChunkChange) {
         this.onChunkChange(idx, this.chunks.length || 1);
       }
-      this.currentChunkIndex++;
-      if (this.currentChunkIndex >= Math.max(1, this.chunks.length)) {
-        this.currentChunkIndex = 0;
+      
+      if (this.forceChunkList === null && this.forceChunkIndex === null) {
+        this.currentChunkIndex++;
+        if (this.currentChunkIndex >= Math.max(1, this.chunks.length)) {
+          this.currentChunkIndex = 0;
+        }
       }
+      
       if (this.isStreaming) {
         this.timerId = window.setTimeout(tick, 1000 / this.options.fps);
       }

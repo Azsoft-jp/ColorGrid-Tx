@@ -43,7 +43,12 @@ export const translations = {
     saveImage: "SAVE IMAGE",
     downloadPayload: "DOWNLOAD PAYLOAD",
     theaterMode: "THEATER MODE",
-    normalMode: "NORMAL MODE"
+    normalMode: "NORMAL MODE",
+    interactiveSync: "Bidirectional Interactive Sync",
+    interactiveSyncDesc: "Establish a reactive closed-loop pipeline by pointing cameras at each other's screen. Transmits on demand & auto-shifts on ACK!",
+    capData: "Net Payload Size",
+    capParity: "RS Parity Size",
+    capTotal: "Gross Frame Capacity"
   },
   ja: {
     subtitle: "光学式ビット転送プロトコル / Pure TS",
@@ -87,7 +92,12 @@ export const translations = {
     saveImage: "画像を保存",
     downloadPayload: "ペイロードをDL",
     theaterMode: "シアターモード",
-    normalMode: "通常モード"
+    normalMode: "通常モード",
+    interactiveSync: "双方向インタラクティブ同期",
+    interactiveSyncDesc: "お互いの画面とカメラをかざし合って、相手の受信完了(ACK)に応じてピパッと必要なチャンクだけをリアクティブ送信する最強モード！",
+    capData: "実質データ容量",
+    capParity: "誤り訂正パリティ",
+    capTotal: "1枚あたり総容量"
   },
   zh: {
     subtitle: "光学比特传输协议 / 纯 TS",
