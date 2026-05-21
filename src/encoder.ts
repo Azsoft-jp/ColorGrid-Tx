@@ -1,5 +1,5 @@
 import { GridProfileId, GridProfile, GRID_PROFILES, PayloadMeta } from "./types";
-import { isReservedCell, PALETTE_RGB, packTo3Bit } from "./utils";
+import { isReservedCell, getHeaderCellIndex, PALETTE_RGB, packTo3Bit } from "./utils";
 import { crc32 } from "./checksum";
 import { ReedSolomon } from "./rs";
 
@@ -27,7 +27,7 @@ export class ColorGridEncoder {
   private chunks: Uint8Array[] = [];
   
   private isStreaming = false;
-  private currentChunkIndex = 0;
+  public currentChunkIndex = 0;
   private timerId: number | null = null;
   private clockState = 0; // 0 or 1
   private rs = new ReedSolomon();
@@ -93,6 +93,10 @@ export class ColorGridEncoder {
    * 1チャンクをCanvasに描画するコア部分！
    */
   renderChunk(index: number): void {
+    if (this.chunks.length > 0 && index >= this.chunks.length) {
+      index = 0;
+      this.currentChunkIndex = 0;
+    }
     const profile = GRID_PROFILES[this.options.profileId];
     const { cellSize, marginCells } = this.options;
     const marginPx = marginCells * cellSize;
@@ -117,13 +121,47 @@ export class ColorGridEncoder {
     this.drawFinder(profile.size - profile.finderSize, 0, drawCell);
     this.drawFinder(0, profile.size - profile.finderSize, drawCell);
 
+    // タイミングパターン描画
+    for (let x = profile.finderSize; x < profile.size - profile.finderSize; x++) {
+      drawCell(x, 6, x % 2 === 0 ? 0 : 7); // 0=黒, 7=白
+    }
+    for (let y = profile.finderSize; y < profile.size - profile.finderSize; y++) {
+      drawCell(6, y, y % 2 === 0 ? 0 : 7);
+    }
+
+    // アライメントパターン描画
+    const apC = profile.size - 6;
+    for (let dy = -3; dy <= 3; dy++) {
+      for (let dx = -3; dx <= 3; dx++) {
+        const ax = apC + dx;
+        const ay = apC + dy;
+        let color = 7; // セパレータ＆中間は白
+        if (Math.abs(dx) === 2 || Math.abs(dy) === 2) {
+          if (Math.abs(dx) <= 2 && Math.abs(dy) <= 2) color = 0; // 外枠
+        } else if (Math.abs(dx) === 0 && Math.abs(dy) === 0) {
+          color = 0; // 中心
+        }
+        drawCell(ax, ay, color);
+      }
+    }
+
+    // セパレータ描画（ファインダーの周りを白で塗る）
+    // 雖然isReservedCellに該当するためデータは置かれないが、白く塗る処理を追加
+    for (let y = 0; y < profile.size; y++) {
+      for (let x = 0; x < profile.size; x++) {
+        // セパレータの判定を簡易的に（ここは予約セル全般がどうせデータ置かれないので描画しても良いが、明示的にセパレータと枠を白にするならこれ）
+        // ただ下で dIdx のループで !isReservedCell のときはデータを描き、それ以外の背景は白にしてあるので特別な処理は不要かも。
+        // でも念の為ここでパレットやクロックを描画する前に背景白だからいいか。
+      }
+    }
+
     // 2. 基準パレット描画
     for (let i = 0; i < 8; i++) {
-      drawCell(profile.finderSize + i, 0, i);
+      drawCell(profile.finderSize + 1 + i, 0, i);
     }
 
     // 3. 同期クロック描画
-    drawCell(profile.finderSize, 1, this.clockState === 0 ? 0 : 7);
+    drawCell(profile.finderSize + 1, 1, this.clockState === 0 ? 0 : 7);
 
     // 今回のチャンクデータ準備
     const payloadBuffer = this.chunks[index] || new Uint8Array(0);
@@ -131,7 +169,7 @@ export class ColorGridEncoder {
     // Header構成 (23 bytes)
     // magic: 0x43475458 (4)
     // version: 1 (1)
-    // profileId: S=0, M=1, L=2, XL=3 (1)
+    // profileId: XS=0, S=1, M=2, L=3, XL=4 (1)
     // gridSize: profile.size (2)
     // flags: 0 (1)
     // chunkIndex: index (2)
@@ -143,8 +181,8 @@ export class ColorGridEncoder {
     const view = new DataView(header.buffer);
     view.setUint32(0, 0x43475458, false); // BigEndian
     view.setUint8(4, 1);
-    const pIdx = ["S", "M", "L", "XL"].indexOf(this.options.profileId);
-    view.setUint8(5, pIdx >= 0 ? pIdx : 1);
+    const pIdx = ["XS", "S", "M", "L", "XL"].indexOf(this.options.profileId);
+    view.setUint8(5, pIdx >= 0 ? pIdx : 2); // Default to M(2)
     view.setUint16(6, profile.size, false);
     view.setUint8(8, 0); // flags
     view.setUint16(9, index, false);
@@ -159,9 +197,14 @@ export class ColorGridEncoder {
 
     // Headerを3bit化して描画
     const header3bit = packTo3Bit(header);
-    for (let i = 0; i < profile.headerCellCount; i++) {
-        const val = i < header3bit.length ? header3bit[i] : 0; 
-        drawCell(profile.finderSize + 1 + i, 1, val);
+    for (let y = 0; y < profile.finderSize; y++) {
+      for (let x = profile.finderSize; x < profile.size - profile.finderSize; x++) {
+        const hIdx = getHeaderCellIndex(x, y, profile);
+        if (hIdx !== -1) {
+           const val = hIdx < header3bit.length ? header3bit[hIdx] : 0; 
+           drawCell(x, y, val);
+        }
+      }
     }
 
     // PayloadのRSエンコードと3bit化

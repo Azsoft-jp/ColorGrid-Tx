@@ -1,6 +1,6 @@
 import { DecodeResult, DecodeDebugInfo, DecodedChunk, Point, GRID_PROFILES, GridProfileId } from "./types";
 import { getPerspectiveTransform, perspectiveTransform, colorDistance } from "./math";
-import { isReservedCell, unpackFrom3Bit, PALETTE_RGB } from "./utils";
+import { isReservedCell, getHeaderCellIndex, unpackFrom3Bit, PALETTE_RGB } from "./utils";
 import { crc32 } from "./checksum";
 import { ReedSolomon } from "./rs";
 
@@ -39,7 +39,7 @@ export class ColorGridDecoder {
     const srcPoints = [TL, TR, BR, BL];
     
     // プロファイルの候補順に試していくよ！
-    const candidateProfiles: GridProfileId[] = ["M", "L", "XL", "S"];
+    const candidateProfiles: GridProfileId[] = ["M", "L", "XL", "S", "XS"];
 
     for (const pId of candidateProfiles) {
       const profile = GRID_PROFILES[pId];
@@ -63,7 +63,7 @@ export class ColorGridDecoder {
       const readPalette: { r: number; g: number; b: number }[] = [];
       let paletteOk = true;
       for (let i = 0; i < 8; i++) {
-        const pt = perspectiveTransform({ x: F + i + 0.5, y: 0.5 }, mat);
+        const pt = perspectiveTransform({ x: F + 1 + i + 0.5, y: 0.5 }, mat);
         const col = this.sampleColor(imageData, pt.x, pt.y);
         if (!col) { paletteOk = false; break; }
         readPalette.push(col);
@@ -71,7 +71,7 @@ export class ColorGridDecoder {
       if (!paletteOk) continue;
 
       // 同期クロック
-      const clockPt = perspectiveTransform({ x: F + 0.5, y: 1.5 }, mat);
+      const clockPt = perspectiveTransform({ x: F + 1 + 0.5, y: 1.5 }, mat);
       const clockCol = this.sampleColor(imageData, clockPt.x, clockPt.y);
       if (!clockCol) continue;
       const clockVal = this.matchColor(clockCol, readPalette);
@@ -83,14 +83,20 @@ export class ColorGridDecoder {
       // }
 
       // ヘッダ領域の読み取り
-      const headerRaw: number[] = [];
       const headerLenPixels = profile.headerCellCount;
+      const headerRaw: number[] = new Array(headerLenPixels).fill(0);
       let headerOk = true;
-      for (let i = 0; i < headerLenPixels; i++) {
-        const pt = perspectiveTransform({ x: F + 1 + i + 0.5, y: 1.5 }, mat);
-        const col = this.sampleColor(imageData, pt.x, pt.y);
-        if (!col) { headerOk = false; break; }
-        headerRaw.push(this.matchColor(col, readPalette));
+
+      for (let y = 0; y < F; y++) {
+        for (let x = F; x < N - F; x++) {
+          const hIdx = getHeaderCellIndex(x, y, profile);
+          if (hIdx !== -1) {
+            const pt = perspectiveTransform({ x: x + 0.5, y: y + 0.5 }, mat);
+            const col = this.sampleColor(imageData, pt.x, pt.y);
+            if (!col) { headerOk = false; break; }
+            headerRaw[hIdx] = this.matchColor(col, readPalette);
+          }
+        }
       }
       if (!headerOk) continue;
 
@@ -177,16 +183,25 @@ export class ColorGridDecoder {
     const height = imageData.height;
     const data = imageData.data;
     
+    // 動的二値化のための平均輝度計算
+    let sumLuma = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      sumLuma += (data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114);
+    }
+    const avgLuma = sumLuma / (width * height);
+    // カメラの明るさに応じて適応的にしきい値を設定！
+    const threshold = Math.max(50, Math.min(avgLuma * 0.9, 180));
+
     // Y輝度で白黒判定するヘルパー
     const isBlack = (i: number) => {
       const r = data[i], g = data[i+1], b = data[i+2];
-      return (r * 0.299 + g * 0.587 + b * 0.114) < 128;
+      return (r * 0.299 + g * 0.587 + b * 0.114) < threshold;
     };
 
     const centers: Point[] = [];
 
-    // 水平方向の走査（間引きして高速化。本来は全行見るのが確実だけど重いみ💦）
-    const step = 4;
+    // 水平方向の走査（確実に見つけるために全行走査する！）
+    const step = 1;
     for (let y = 0; y < height; y += step) {
       let stateCounts = [0, 0, 0, 0, 0];
       let currentState = 0; // 0:黒 1:白 ... 4:黒
@@ -194,6 +209,11 @@ export class ColorGridDecoder {
       for (let x = 0; x < width; x++) {
         const i = (y * width + x) * 4;
         const black = isBlack(i);
+
+        // 最初の黒を見つけるまでは無視！
+        if (currentState === 0 && !black) {
+          continue;
+        }
 
         if ((currentState % 2 === 0 && black) || (currentState % 2 === 1 && !black)) {
           stateCounts[currentState]++;
@@ -207,13 +227,11 @@ export class ColorGridDecoder {
               currentState = 0;
               stateCounts = [0, 0, 0, 0, 0];
             } else {
-              // ダメだったらシフト
-              stateCounts[0] = stateCounts[2];
-              stateCounts[1] = stateCounts[3];
-              stateCounts[2] = stateCounts[4];
-              stateCounts[3] = 1;
-              stateCounts[4] = 0;
-              currentState = 3;
+              // 比率が合わなかった場合は、シフトではなく完全にリセットする！
+              // ファインダーパターンの前には必ずセパレータ(白)があるので、
+              // ゴミデータからシフトして引き継ぐと状態が狂ってしまうため。
+              currentState = 0;
+              stateCounts = [0, 0, 0, 0, 0];
             }
           } else {
             currentState++;
@@ -224,34 +242,49 @@ export class ColorGridDecoder {
     }
 
     // 見つかった点の近くをまとめる（クラスタリング）
-    const merged: Point[] = [];
-    outer: for (const pt of centers) {
-      for (const m of merged) {
-        // ざっくり30px以内なら同じファインダーとみなす！
-        const dist = Math.hypot(pt.x - m.x, pt.y - m.y);
-        if (dist < 30) {
-          m.x = (m.x + pt.x) / 2;
-          m.y = (m.y + pt.y) / 2;
-          continue outer;
+    const clusters: Point[][] = [];
+    for (const pt of centers) {
+      let found = false;
+      for (const cluster of clusters) {
+        // クラスタの最初の点との距離を見る（中心が引きずられるのを防止！）
+        const dist = Math.hypot(pt.x - cluster[0].x, pt.y - cluster[0].y);
+        // 同じファインダーパターンの構成点とみなす距離
+        // ファインダーのサイズはある程度幅広いので、少し余裕をもたせる
+        if (dist < 40) {
+          cluster.push(pt);
+          found = true;
+          break;
         }
       }
-      merged.push(pt);
+      if (!found) clusters.push([pt]);
     }
 
-    // 上位3つを返す（実際はもっと厳密にやった方がいいけどMVPなので！）
-    return merged.slice(0, 3);
+    // 点の数（クラスタの大きさ）が多い順にソート！
+    // 本物のファインダーは縦にも長いので、何行もヒットして大量の点が集まる。
+    // ゴミデータによる偶然の一致は数行しか続かないので弾ける！
+    clusters.sort((a, b) => b.length - a.length);
+
+    const merged = clusters.slice(0, 3).map(cluster => {
+      const sumX = cluster.reduce((a, b) => a + b.x, 0);
+      const sumY = cluster.reduce((a, b) => a + b.y, 0);
+      return { x: sumX / cluster.length, y: sumY / cluster.length };
+    });
+
+    // 上位3つを返す
+    return merged;
   }
 
-  // 1:1:3:1:1 の比率許容チェック (許容誤差50%くらい)
+  // 1:1:3:1:1 の比率許容チェック (許容誤差100%くらいに緩める！)
   private checkRatio(counts: number[]): boolean {
     const total = counts.reduce((a, b) => a + b, 0);
-    if (total < 10) return false;
+    if (total < 7) return false;
     const moduleSize = total / 7;
-    const maxVariance = moduleSize / 1.5;
+    // ブレやすいカメラ映像のため、誤差許容をガッツリ広げる
+    const maxVariance = moduleSize * 1.2;
 
     return Math.abs(moduleSize - counts[0]) < maxVariance &&
            Math.abs(moduleSize - counts[1]) < maxVariance &&
-           Math.abs(3 * moduleSize - counts[2]) < 3 * maxVariance &&
+           Math.abs(3 * moduleSize - counts[2]) < maxVariance * 3 &&
            Math.abs(moduleSize - counts[3]) < maxVariance &&
            Math.abs(moduleSize - counts[4]) < maxVariance;
   }

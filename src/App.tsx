@@ -2,14 +2,27 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ColorGridEncoder } from './encoder';
 import { ColorGridDecoder } from './decoder';
 import { GRID_PROFILES, GridProfileId, DecodeDebugInfo, PayloadMeta } from './types';
+import { translations, Language } from './i18n';
 
 export default function App() {
   const [mode, setMode] = useState<"SEND" | "RECEIVE">("SEND");
+  const [lang, setLang] = useState<Language>('ja');
   
+  const t = translations[lang];
+
+  const [testResult, setTestResult] = useState<{
+    ok: boolean;
+    title: string;
+    details: string;
+  } | null>(null);
+
   // ================= SEND MODE =================
   const encCanvasRef = useRef<HTMLCanvasElement>(null);
   const [encoder, setEncoder] = useState<ColorGridEncoder | null>(null);
   const [sendText, setSendText] = useState("Hello, ColorGrid! 👋✨");
+  const [payloadType, setPayloadType] = useState<"text" | "file">("text");
+  const [fileData, setFileData] = useState<Uint8Array | null>(null);
+  const [fileMeta, setFileMeta] = useState<PayloadMeta | null>(null);
   const [profileId, setProfileId] = useState<GridProfileId>("M");
   const [cellSize, setCellSize] = useState(5);
   const [marginCells, setMarginCells] = useState(4);
@@ -18,9 +31,14 @@ export default function App() {
   const [encStats, setEncStats] = useState({ totalChunks: 0 });
 
   useEffect(() => {
+    let enc: ColorGridEncoder | null = null;
     if (encCanvasRef.current && !encoder) {
-      setEncoder(new ColorGridEncoder(encCanvasRef.current));
+      enc = new ColorGridEncoder(encCanvasRef.current);
+      setEncoder(enc);
     }
+    return () => {
+      enc?.stopStreaming();
+    };
   }, []);
 
   useEffect(() => {
@@ -30,25 +48,31 @@ export default function App() {
       encoder.setMarginCells(marginCells);
       updateEncData();
     }
-  }, [profileId, cellSize, marginCells, sendText]);
+  }, [profileId, cellSize, marginCells, sendText, payloadType, fileData]);
 
   const updateEncData = () => {
     if (!encoder) return;
-    const data = new TextEncoder().encode(sendText);
-    const meta: PayloadMeta = { type: "text" };
-    encoder.setData(data, meta);
+    if (payloadType === "text") {
+      const data = new TextEncoder().encode(sendText);
+      const meta: PayloadMeta = { type: "text" };
+      encoder.setData(data, meta);
+    } else if (payloadType === "file" && fileData && fileMeta) {
+      encoder.setData(fileData, fileMeta);
+    } else {
+      encoder.setData(new Uint8Array(0));
+    }
     setEncStats({ totalChunks: encoder.getStats().totalChunks });
-    encoder.renderChunk(0); // プレビューとして0番目を描画
+    encoder.renderChunk(isStreaming ? encoder.currentChunkIndex : 0);
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files || !e.target.files[0] || !encoder) return;
+    if (!e.target.files || !e.target.files[0]) return;
     const file = e.target.files[0];
     const buffer = await file.arrayBuffer();
     const meta: PayloadMeta = { type: "file", filename: file.name, mimeType: file.type };
-    encoder.setData(new Uint8Array(buffer), meta);
-    setEncStats({ totalChunks: encoder.getStats().totalChunks });
-    encoder.renderChunk(0);
+    setFileData(new Uint8Array(buffer));
+    setFileMeta(meta);
+    setPayloadType("file");
   };
 
   const toggleStreaming = () => {
@@ -67,6 +91,7 @@ export default function App() {
   const decCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [decOutputText, setDecOutputText] = useState("");
+  const [decPayload, setDecPayload] = useState<Uint8Array | null>(null);
   const [debugInfo, setDebugInfo] = useState<DecodeDebugInfo | null>(null);
   const [chunksReceived, setChunksReceived] = useState<Record<number, Uint8Array>>({});
   const decoderRef = useRef(new ColorGridDecoder());
@@ -81,7 +106,11 @@ export default function App() {
         setIsCameraOn(true);
       }
     } catch (e) {
-      alert("カメラの許可が取れないみ😭 " + String(e));
+      setTestResult({
+         ok: false,
+         title: "Camera Error",
+         details: "カメラの許可が取れないみ😭\n" + String(e)
+      });
     }
   };
 
@@ -158,6 +187,7 @@ export default function App() {
                           resultData.set(next[i], offset);
                           offset += next[i].length;
                        }
+                       setDecPayload(resultData);
                        setDecOutputText(new TextDecoder().decode(resultData));
                     }
                     return next;
@@ -176,26 +206,91 @@ export default function App() {
 
   // ================= SELF TEST =================
   const runSelfTest = () => {
-     if (!encoder || !encCanvasRef.current) return;
-     const ctx = encCanvasRef.current.getContext('2d');
+     // 仮想キャンバスを作って確実に状態非依存でテストするみ！✨
+     const tempCanvas = document.createElement('canvas');
+     const tempEncoder = new ColorGridEncoder(tempCanvas);
+     
+     tempEncoder.setProfile(profileId);
+     tempEncoder.setCellSize(cellSize);
+     tempEncoder.setMarginCells(marginCells);
+     
+     if (payloadType === "text") {
+       tempEncoder.setData(new TextEncoder().encode(sendText), { type: "text" });
+     } else if (fileData && fileMeta) {
+       tempEncoder.setData(fileData, fileMeta);
+     }
+     tempEncoder.renderChunk(0);
+
+     const ctx = tempCanvas.getContext('2d');
      if (!ctx) return;
      
      const tStart = performance.now();
-     const imageData = ctx.getImageData(0, 0, encCanvasRef.current.width, encCanvasRef.current.height);
+     const imageData = ctx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
      const decoder = new ColorGridDecoder();
      const res = decoder.decodeFrame(imageData);
      const tEnd = performance.now();
      
      if (res.ok && res.chunk) {
-       const recovered = new TextDecoder().decode(res.chunk.payload);
-       alert(`✅ テスト成功！\n\n[Send]: ${sendText}\n[Recovered]: ${recovered}\n[Time]: ${Math.round(tEnd - tStart)}ms`);
+       const recovered = payloadType === "text" 
+          ? new TextDecoder().decode(res.chunk.payload)
+          : `[Binary Data: ${res.chunk.payload.length} bytes]`;
+       setTestResult({
+         ok: true,
+         title: t.testSuccess,
+         details: `[${t.send}]: ${payloadType === 'text' ? sendText : 'File'}\n[${t.recovered}]: ${recovered}\n[${t.time}]: ${Math.round(tEnd - tStart)}ms`
+       });
      } else {
-       alert(`❌ テスト失敗...\n理由: ${res.reason}`);
+       setTestResult({
+         ok: false,
+         title: t.testFailed,
+         details: `${t.reason}: ${res.reason}\n\nCanvas Size: ${tempCanvas.width}x${tempCanvas.height}`
+       });
      }
+  };
+
+  const handleSaveImage = () => {
+    if (!encCanvasRef.current) return;
+    const url = encCanvasRef.current.toDataURL("image/png");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "colorgrid_tx.png";
+    a.click();
+  };
+
+  const handleDownloadPayload = () => {
+    if (!decPayload) return;
+    const blob = new Blob([decPayload]);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "received_payload.bin";
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
     <div className="fixed inset-0 bg-[#0f1115] text-[#d1d5db] font-sans flex flex-col p-4 select-none lg:overflow-hidden overflow-y-auto">
+      {testResult && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-[#1c2128] border border-[#374151] rounded-xl p-6 shadow-2xl max-w-md w-full flex flex-col">
+            <h3 className={`text-lg font-bold mb-4 ${testResult.ok ? 'text-green-400' : 'text-red-400'}`}>
+              {testResult.title}
+            </h3>
+            <pre className="text-xs text-gray-300 font-mono whitespace-pre-wrap bg-[#15181e] p-3 rounded border border-[#2d333d] overflow-x-auto">
+              {testResult.details}
+            </pre>
+            <div className="mt-6 flex justify-end">
+              <button
+                onClick={() => setTestResult(null)}
+                className="px-4 py-2 bg-[#2d333d] hover:bg-[#374151] text-white text-xs font-bold rounded transition-colors"
+              >
+                CLOSE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header Section */}
       <header className="flex flex-col md:flex-row items-center justify-between border-b border-[#2d333d] pb-4 mb-4 gap-4 shrink-0">
         <div className="flex items-center gap-3">
@@ -210,13 +305,24 @@ export default function App() {
               ColorGrid-Tx 
               <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 bg-cyan-900/40 text-cyan-400 rounded border border-cyan-800">v1.1.0-alpha</span>
             </h1>
-            <p className="text-[11px] text-gray-500 font-mono">OPTICAL BIT-TRANSFER PROTOCOL / PURE TS</p>
+            <p className="text-[11px] text-gray-500 font-mono">{t.subtitle}</p>
           </div>
         </div>
         
         <div className="flex items-center gap-2 flex-wrap justify-center">
-          <button onClick={runSelfTest} className="px-4 py-2 bg-[#1c1f26] border border-[#374151] rounded text-xs font-semibold hover:bg-[#2d333d] transition-colors flex items-center gap-2 text-white shadow-md">
-            <span className="w-2 h-2 rounded-full bg-yellow-500 inline-block"></span> RUN SELF-TEST
+          <select
+            value={lang}
+            onChange={e => setLang(e.target.value as Language)}
+            className="bg-[#1c1f26] border border-[#374151] rounded px-3 py-1.5 text-xs font-semibold text-white outline-none cursor-pointer hover:bg-[#2d333d] shadow-md"
+          >
+            <option value="ja">🇯🇵 日本語</option>
+            <option value="en">🇺🇸 EN</option>
+            <option value="zh">🇨🇳 中文</option>
+            <option value="ko">🇰🇷 한국어</option>
+            <option value="ru">🇷🇺 РУС</option>
+          </select>
+          <button onClick={runSelfTest} className="px-4 py-1.5 bg-[#1c1f26] border border-[#374151] rounded text-xs font-semibold hover:bg-[#2d333d] transition-colors flex items-center gap-2 text-white shadow-md">
+            <span className="w-2 h-2 rounded-full bg-yellow-500 inline-block"></span> {t.selfTest}
           </button>
           
           <div className="flex bg-[#1c1f26] border border-[#374151] rounded p-0.5 shadow-md">
@@ -224,13 +330,13 @@ export default function App() {
               onClick={() => setMode("SEND")}
               className={`px-4 py-1.5 rounded text-xs font-bold transition-colors ${mode === "SEND" ? "bg-cyan-600 text-white shadow-lg shadow-cyan-900/20" : "text-gray-400 hover:text-white"}`}
             >
-              ENC_MODE
+              {t.encMode}
             </button>
             <button
               onClick={() => setMode("RECEIVE")}
               className={`px-4 py-1.5 rounded text-xs font-bold transition-colors ${mode === "RECEIVE" ? "bg-pink-600 text-white shadow-lg shadow-pink-900/20" : "text-gray-400 hover:text-white"}`}
             >
-              DEC_MODE
+              {t.decMode}
             </button>
           </div>
         </div>
@@ -239,51 +345,61 @@ export default function App() {
       {/* Main Operation Area */}
       <main className="flex-1 min-h-0 overflow-y-auto lg:overflow-hidden pb-2 lg:pb-0">
         {mode === "SEND" && (
-          <div className="grid lg:grid-cols-2 gap-4 h-full min-h-[600px] lg:min-h-0">
+          <div className="grid lg:grid-cols-2 gap-4 h-auto lg:h-full lg:min-h-0">
             {/* Left: Encoder Controls */}
-            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 overflow-y-auto relative h-full">
+            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 overflow-y-auto relative h-[500px] lg:h-full shrink-0 lg:shrink">
               <div className="flex items-center justify-between mb-4 shrink-0">
-                <span className="text-[10px] font-bold text-cyan-400 tracking-widest uppercase">ENCODER / TX_NODE</span>
-                <span className="text-[10px] font-mono text-gray-500 uppercase">Status: {isStreaming ? "Transmitting" : "Standby"}</span>
+                <span className="text-[10px] font-bold text-cyan-400 tracking-widest uppercase">{t.encoderTitle}</span>
+                <span className="text-[10px] font-mono text-gray-500 uppercase">Status: {isStreaming ? t.statusTransmitting : t.statusStandby}</span>
               </div>
 
               <div className="space-y-4 flex-1">
                 <div className="flex flex-col gap-1">
-                  <label className="text-[10px] font-bold uppercase text-gray-500">Payload Source (Text)</label>
+                  <label className="text-[10px] font-bold uppercase text-gray-500">{t.payloadSourceText}</label>
                   <textarea 
                     className="bg-[#1c2128] border border-[#374151] rounded p-3 text-sm text-white focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 outline-none transition-all placeholder-gray-600"
                     rows={3}
                     value={sendText}
-                    onChange={e => setSendText(e.target.value)}
+                    onChange={e => { setPayloadType("text"); setSendText(e.target.value); }}
                   />
+                  {payloadType === "text" && sendText.startsWith("data:image/") && (
+                    <div className="mt-2 bg-black/40 rounded p-2 flex items-center justify-center border border-[#2d333d]">
+                      <img src={sendText} alt="Payload Preview" className="max-h-24 object-contain rounded" />
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex flex-col gap-1">
-                  <label className="text-[10px] font-bold uppercase text-gray-500">File Ingestion</label>
+                  <label className="text-[10px] font-bold uppercase text-gray-500">{t.fileIngestion}</label>
                   <input type="file" onChange={handleFileChange} className="text-xs text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-[#2d333d] file:text-gray-200 hover:file:bg-[#374151] cursor-pointer" />
+                  {payloadType === "file" && fileData && fileMeta && fileMeta.mimeType?.startsWith("image/") && (
+                    <div className="mt-2 bg-black/40 rounded p-2 flex items-center justify-center border border-[#2d333d]">
+                      <img src={URL.createObjectURL(new Blob([fileData], { type: fileMeta.mimeType }))} alt="File Preview" className="max-h-24 object-contain rounded" />
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div className="flex flex-col gap-1">
-                    <label className="text-[10px] font-bold uppercase text-gray-500">Profile</label>
+                    <label className="text-[10px] font-bold uppercase text-gray-500">{t.profile}</label>
                     <select className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={profileId} onChange={e => setProfileId(e.target.value as GridProfileId)}>
                       {Object.keys(GRID_PROFILES).map(k => <option key={k} value={k}>{GRID_PROFILES[k as GridProfileId].name}</option>)}
                     </select>
                   </div>
                   <div className="flex flex-col gap-1">
-                    <label className="text-[10px] font-bold uppercase text-gray-500">Cell Size (px)</label>
+                    <label className="text-[10px] font-bold uppercase text-gray-500">{t.cellSize}</label>
                     <select className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={cellSize} onChange={e => setCellSize(Number(e.target.value))}>
                       {[3, 4, 5, 6, 7, 8].map(v => <option key={v} value={v}>{v}px</option>)}
                     </select>
                   </div>
                   <div className="flex flex-col gap-1">
-                    <label className="text-[10px] font-bold uppercase text-gray-500">Margin Cells</label>
+                    <label className="text-[10px] font-bold uppercase text-gray-500">{t.marginCells}</label>
                     <select className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={marginCells} onChange={e => setMarginCells(Number(e.target.value))}>
                       {[2, 4, 6, 8].map(v => <option key={v} value={v}>{v} cells</option>)}
                     </select>
                   </div>
                   <div className="flex flex-col gap-1">
-                    <label className="text-[10px] font-bold uppercase text-gray-500">Sync FPS</label>
+                    <label className="text-[10px] font-bold uppercase text-gray-500">{t.syncFps}</label>
                     <input type="number" className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={fps} onChange={e => setFps(Number(e.target.value))} />
                   </div>
                 </div>
@@ -297,15 +413,21 @@ export default function App() {
                       ? "bg-red-600/10 border border-red-600/50 text-red-500 hover:bg-red-600/20 shadow-[0_0_10px_rgba(239,68,68,0.2)]" 
                       : "bg-green-600/10 border border-green-600/50 text-green-500 hover:bg-green-600/20 shadow-[0_0_10px_rgba(34,197,94,0.2)]"}`}
                 >
-                  {isStreaming ? "STOP TRANSMISSION" : "START TRANSMISSION"}
+                  {isStreaming ? t.stopTransmission : t.startTransmission}
                 </button>
               </div>
             </section>
 
             {/* Right: Encoder Canvas output */}
-            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-full">
+            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-[400px] lg:h-full">
               <div className="flex items-center justify-between mb-3 shrink-0">
-                <span className="text-[10px] font-bold text-gray-500 uppercase pt-1">Matrix Output</span>
+                <span className="text-[10px] font-bold text-gray-500 uppercase pt-1">{t.matrixOutput}</span>
+                <button
+                  onClick={handleSaveImage}
+                  className="px-3 py-1 bg-[#2d333d] hover:bg-[#374151] rounded text-[10px] font-bold text-gray-300 transition-colors border border-[#4b5563]"
+                >
+                  {t.saveImage}
+                </button>
               </div>
               
               <div className="flex-1 bg-black rounded border border-[#2d333d] flex items-center justify-center p-2 relative group overflow-hidden">
@@ -317,8 +439,8 @@ export default function App() {
                 </div>
                 
                 <div className="absolute bottom-4 right-4 flex flex-col gap-1 items-end z-20">
-                   <div className="text-[10px] font-mono bg-black/60 px-2 py-1 text-cyan-300 border border-cyan-800">CHUNKS: {encStats.totalChunks}</div>
-                   {isStreaming && <div className="text-[10px] font-mono bg-black/60 px-2 py-1 text-green-400 border border-green-800">FPS: {fps} (TARGET)</div>}
+                   <div className="text-[10px] font-mono bg-black/60 px-2 py-1 text-cyan-300 border border-cyan-800">{t.chunks}: {encStats.totalChunks}</div>
+                   {isStreaming && <div className="text-[10px] font-mono bg-black/60 px-2 py-1 text-green-400 border border-green-800">{t.fpsTarget}: {fps}</div>}
                 </div>
               </div>
             </section>
@@ -326,18 +448,18 @@ export default function App() {
         )}
 
         {mode === "RECEIVE" && (
-          <div className="grid lg:grid-cols-2 gap-4 h-full min-h-[600px] lg:min-h-0">
+          <div className="grid lg:grid-cols-2 gap-4 h-auto lg:h-full lg:min-h-0">
             {/* Left: Decoder Camera Feed */}
-            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-full overflow-hidden">
+            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-[450px] lg:h-full overflow-hidden shrink-0 lg:shrink">
               <div className="flex items-center justify-between mb-3 shrink-0">
-                <span className="text-[10px] font-bold text-pink-400 tracking-widest">DECODER / RX_NODE</span>
-                <span className="text-[10px] font-mono text-gray-500 uppercase">Camera: {isCameraOn ? "Active" : "Inactive"}</span>
+                <span className="text-[10px] font-bold text-pink-400 tracking-widest">{t.decoderTitle}</span>
+                <span className="text-[10px] font-mono text-gray-500 uppercase">Camera: {isCameraOn ? t.cameraActive : t.cameraInactive}</span>
               </div>
 
-              <div className="flex-1 bg-black rounded border border-[#2d333d] overflow-hidden relative flex flex-col items-center justify-center min-h-[300px]">
+              <div className="flex-1 bg-black rounded border border-[#2d333d] overflow-hidden relative flex flex-col items-center justify-center min-h-[250px]">
                 {!isCameraOn && (
                   <div className="text-gray-600 font-mono text-xs flex items-center gap-2">
-                    <span className="w-2 h-2 bg-gray-600 rounded-full"></span> CAM_OFFLINE
+                    <span className="w-2 h-2 bg-gray-600 rounded-full"></span> {t.camOffline}
                   </div>
                 )}
                 <video ref={videoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover opacity-80"></video>
@@ -345,7 +467,7 @@ export default function App() {
                 
                 {isCameraOn && <div className="absolute top-4 left-4 flex flex-col gap-1 z-20">
                   <div className={`text-[9px] font-mono px-2 py-0.5 uppercase border ${debugInfo?.detectedProfileId ? 'bg-pink-900/60 text-pink-200 border-pink-700' : 'bg-black/60 text-gray-400 border-gray-700'}`}>
-                    Sync: {debugInfo?.detectedProfileId ? 'LOCKED' : 'SEARCHING'}
+                    Sync: {debugInfo?.detectedProfileId ? t.syncLocked : t.syncSearching}
                   </div>
                 </div>}
               </div>
@@ -358,23 +480,23 @@ export default function App() {
                       ? "bg-red-600/10 border border-red-600/50 text-red-500 hover:bg-red-600/20" 
                       : "bg-pink-600/10 border border-pink-600/50 text-pink-500 hover:bg-pink-600/20 shadow-[0_0_10px_rgba(236,72,153,0.2)]"}`}
                 >
-                  {isCameraOn ? "TERMINATE SCANNER" : "INITIALIZE SCANNER"}
+                  {isCameraOn ? t.termScanner : t.initScanner}
                 </button>
               </div>
             </section>
 
             {/* Right: Decoder Outputs & Logs */}
-            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-full">
+            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-[350px] lg:h-full">
               <div className="flex items-center justify-between mb-3 shrink-0">
-                <span className="text-[10px] font-bold text-gray-500 uppercase pt-1">Telemetry & Payload</span>
+                <span className="text-[10px] font-bold text-gray-500 uppercase pt-1">{t.telemetryPayload}</span>
               </div>
 
               <div className="flex-1 flex flex-col gap-4 min-h-0">
                 <div className="flex-1 bg-black/40 border border-[#2d333d] p-3 rounded flex flex-col overflow-hidden">
                   <div className="flex justify-between items-center mb-2 shrink-0">
-                    <span className="text-[10px] font-bold text-gray-500 uppercase">Live Decode Logs</span>
+                    <span className="text-[10px] font-bold text-gray-500 uppercase">{t.liveDecodeLogs}</span>
                     <span className={`text-[10px] font-mono uppercase ${debugInfo?.crcOk ? 'text-green-500' : 'text-gray-600'}`}>
-                      CRC: {debugInfo?.crcOk ? "OK" : "WAITING"}
+                      CRC: {debugInfo?.crcOk ? t.crcOk : t.crcWaiting}
                     </span>
                   </div>
                   <div className="text-[11px] font-mono leading-relaxed flex-1 overflow-y-auto space-y-1">
@@ -393,12 +515,27 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-col gap-1 shrink-0">
-                  <label className="text-[10px] font-bold text-gray-500 uppercase">Recovered Payload Buffer</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-bold text-gray-500 uppercase">{t.recoveredPayload}</label>
+                    {decPayload && (
+                      <button
+                        onClick={handleDownloadPayload}
+                        className="px-3 py-1 bg-[#2d333d] hover:bg-[#374151] rounded text-[10px] font-bold text-cyan-300 transition-colors border border-[#4b5563]"
+                      >
+                        {t.downloadPayload}
+                      </button>
+                    )}
+                  </div>
+                  {decOutputText.startsWith("data:image/") && (
+                    <div className="bg-[#1c2128] border border-[#374151] rounded p-2 mt-1 mb-2 flex justify-center shrink-0">
+                      <img src={decOutputText} alt="Decoded Preview" className="max-h-32 object-contain rounded drop-shadow-lg" />
+                    </div>
+                  )}
                   <textarea 
                     className="w-full bg-[#1c2128] border border-[#374151] rounded p-3 text-sm text-cyan-400 font-mono outline-none h-28 resize-none shadow-inner leading-relaxed overflow-y-auto" 
                     readOnly 
                     value={decOutputText} 
-                    placeholder="[NO_DATA]" 
+                    placeholder={t.noData} 
                   />
                 </div>
               </div>

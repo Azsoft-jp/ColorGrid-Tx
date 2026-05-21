@@ -15,10 +15,41 @@ export const PALETTE_RGB = [
  * データの書き込みを除外する予約セル判定！
  * ファインダーやパレット、ヘッダにはデータ被らせないようにするよ✨
  */
-export function isReservedCell(x: number, y: number, profile: GridProfile): boolean {
+export function getHeaderCellIndex(x: number, y: number, profile: GridProfile): number {
   const G = profile.size;
   const F = profile.finderSize;
   const H = profile.headerCellCount;
+  
+  if (y >= F) return -1;
+  if (x < F || x >= G - F) return -1;
+  
+  // y=0: パレット (x=F+1 ~ F+8)
+  if (y === 0 && x >= F + 1 && x < F + 9) return -1;
+  // y=1: クロック (x=F+1)
+  if (y === 1 && x === F + 1) return -1;
+
+  // タイミングパターン
+  if (y === 6) return -1;
+  
+  let idx = 0;
+  for (let cy = 0; cy <= y; cy++) {
+    for (let cx = F + 1; cx < G - F - 1; cx++) {
+      if (cy === 0 && cx >= F + 1 && cx < F + 9) continue;
+      if (cy === 1 && cx === F + 1) continue;
+      if (cy === 6) continue;
+      
+      if (cy === y && cx === x) {
+        return idx < H ? idx : -1;
+      }
+      idx++;
+    }
+  }
+  return -1;
+}
+
+export function isReservedCell(x: number, y: number, profile: GridProfile): boolean {
+  const G = profile.size;
+  const F = profile.finderSize;
 
   // 左上ファインダー
   if (x < F && y < F) return true;
@@ -27,16 +58,30 @@ export function isReservedCell(x: number, y: number, profile: GridProfile): bool
   // 左下ファインダー
   if (x < F && y >= G - F) return true;
 
-  // 基準パレット(8色): (7, 0) 〜 (14, 0)
-  if (y === 0 && x >= F && x < F + 8) return true;
+  // セパレータ（ファインダー周囲1セルは常に白）
+  // 左上ファインダー周囲
+  if ((x === F && y <= F) || (y === F && x <= F)) return true;
+  // 右上ファインダー周囲
+  if ((x === G - F - 1 && y <= F) || (y === F && x >= G - F - 1)) return true;
+  // 左下ファインダー周囲
+  if ((x === F && y >= G - F - 1) || (y === G - F - 1 && x <= F)) return true;
 
-  // 同期クロック: (7, 1)
-  if (y === 1 && x === F) return true;
+  // タイミングパターン (x=6 と y=6, ファインダーパターンの間を結ぶ)
+  if (y === 6 && x >= 7 && x < G - 7) return true;
+  if (x === 6 && y >= 7 && y < G - 7) return true;
 
-  // ヘッダ領域: (8, 1) 〜 (8+H-1, 1) に横並び！
-  // (もしHが大きくてもひとまず横1列と仮定するみ。超えそうな場合は折り返し必要だけど
-  // 今回の最大Header=56でも size=89 なら横に収まるっしょ✌️)
-  if (y === 1 && x > F && x <= F + H) return true;
+  // 右下アライメントパターン + 周囲セパレータ (7x7)
+  const apC = G - 6;
+  if (x >= apC - 3 && x <= apC + 3 && y >= apC - 3 && y <= apC + 3) return true;
+
+  // 基準パレット(8色): (F+1, 0) 〜 (F+8, 0)
+  if (y === 0 && x >= F + 1 && x < F + 9) return true;
+
+  // 同期クロック: (F+1, 1)
+  if (y === 1 && x === F + 1) return true;
+
+  // ヘッダ領域
+  if (getHeaderCellIndex(x, y, profile) !== -1) return true;
 
   return false;
 }
