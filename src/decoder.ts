@@ -22,14 +22,28 @@ export class ColorGridDecoder {
     }
 
     // 2. クラスタリングして 左上(TL), 右上(TR), 左下(BL) を特定
-    // 今回は簡易的に「一番左上がTL」「TLからx方向に離れてるのがTR」「y方向に離れてるのがBL」とするよ
-    finderCenters.sort((a, b) => (a.x + a.y) - (b.x + b.y));
-    const TL = finderCenters[0];
-    let TR = finderCenters[1];
-    let BL = finderCenters[2];
-    
-    // TRとBLが逆になってないかチェック（右上はxが大きく、左下はyが大きい）
-    if (TR.x - TL.x < BL.x - TL.x && TR.y - TL.y > BL.y - TL.y) {
+    // 3点の中で最も距離が離れている2点（対角）がTRとBL、残りの1点がTLになるはず！
+    let maxDist = 0;
+    let trBlPair = [finderCenters[0], finderCenters[1]];
+    let tlNode = finderCenters[2];
+    for (let i = 0; i < 3; i++) {
+      for (let j = i + 1; j < 3; j++) {
+        const dist = Math.hypot(finderCenters[i].x - finderCenters[j].x, finderCenters[i].y - finderCenters[j].y);
+        if (dist > maxDist) {
+          maxDist = dist;
+          trBlPair = [finderCenters[i], finderCenters[j]];
+          tlNode = finderCenters.find(p => p !== finderCenters[i] && p !== finderCenters[j])!;
+        }
+      }
+    }
+    const TL = tlNode;
+    let [TR, BL] = trBlPair;
+
+    // TR と BL の向き合わせ: TL -> TR のベクトルと TL -> BL のベクトルの外積（2Dクロス積）を使う
+    // Y軸が下向きの画面座標系では、TL->TRから見て時計回りにTL->BLがある場合、外積はプラスになる
+    const crossProduct = (TR.x - TL.x) * (BL.y - TL.y) - (TR.y - TL.y) * (BL.x - TL.x);
+    if (crossProduct < 0) {
+      // 逆だったら入れ替える！
       const temp = TR; TR = BL; BL = temp;
     }
 
@@ -41,6 +55,8 @@ export class ColorGridDecoder {
     
     // プロファイルの候補順に試していくよ！
     const candidateProfiles: GridProfileId[] = ["M", "L", "XL", "S", "XS"];
+
+    const log: string[] = [];
 
     for (const pId of candidateProfiles) {
       const profile = GRID_PROFILES[pId];
@@ -60,21 +76,32 @@ export class ColorGridDecoder {
       const mat = getPerspectiveTransform(dstPoints, srcPoints);
       if (!mat) continue;
 
+      const pt0 = perspectiveTransform({x:0, y:0}, mat);
+      const pt1 = perspectiveTransform({x:1, y:0}, mat);
+      const cellWidth = Math.hypot(pt1.x - pt0.x, pt1.y - pt0.y);
+      const sampleRadius = cellWidth < 8 ? 0 : 1;
+
       // 基準パレット(8色)の読み取り
       const readPalette: { r: number; g: number; b: number }[] = [];
       let paletteOk = true;
       for (let i = 0; i < 8; i++) {
         const pt = perspectiveTransform({ x: F + 1 + i + 0.5, y: 0.5 }, mat);
-        const col = this.sampleColor(imageData, pt.x, pt.y);
+        const col = this.sampleColor(imageData, pt.x, pt.y, sampleRadius);
         if (!col) { paletteOk = false; break; }
         readPalette.push(col);
       }
-      if (!paletteOk) continue;
+      if (!paletteOk) {
+        log.push(`${pId}: palette read failed`);
+        continue;
+      }
 
       // 同期クロック
       const clockPt = perspectiveTransform({ x: F + 1 + 0.5, y: 1.5 }, mat);
-      const clockCol = this.sampleColor(imageData, clockPt.x, clockPt.y);
-      if (!clockCol) continue;
+      const clockCol = this.sampleColor(imageData, clockPt.x, clockPt.y, sampleRadius);
+      if (!clockCol) {
+        log.push(`${pId}: clock read failed`);
+        continue;
+      }
       const clockVal = this.matchColor(clockCol, readPalette);
       debug.clockValue = clockVal;
       
@@ -84,7 +111,7 @@ export class ColorGridDecoder {
       // }
 
       // ヘッダ領域の読み取り
-      const headerLenPixels = profile.headerCellCount;
+      const headerLenPixels = profile.headerCellCount; // 64 cells -> 192 bits -> 24 bytes
       const headerRaw: number[] = new Array(headerLenPixels).fill(0);
       let headerOk = true;
 
@@ -93,34 +120,42 @@ export class ColorGridDecoder {
           const hIdx = getHeaderCellIndex(x, y, profile);
           if (hIdx !== -1) {
             const pt = perspectiveTransform({ x: x + 0.5, y: y + 0.5 }, mat);
-            const col = this.sampleColor(imageData, pt.x, pt.y);
+            const col = this.sampleColor(imageData, pt.x, pt.y, sampleRadius);
             if (!col) { headerOk = false; break; }
             headerRaw[hIdx] = this.matchColor(col, readPalette);
           }
         }
       }
-      if (!headerOk) continue;
+      if (!headerOk) {
+        log.push(`${pId}: header cells out of bounds`);
+        continue;
+      }
 
-      const headerBytes = unpackFrom3Bit(new Uint8Array(headerRaw), 23);
-      if (headerBytes.length < 23) continue;
+      const headerBytesEnc = unpackFrom3Bit(new Uint8Array(headerRaw), 24);
+      if (headerBytesEnc.length < 24) continue;
 
-      const view = new DataView(headerBytes.buffer);
-      const magic = view.getUint32(0, false);
-      if (magic !== 0x43475458) continue; // "CGTX" じゃないなら次！
+      // RSデコード (12 bytes data, 12 bytes parity)
+      const headerBytes = this.rs.decode(headerBytesEnc, 12);
+      if (!headerBytes) {
+        log.push(`${pId}: header RS decode fail`);
+        continue; // RSデコード失敗！
+      }
 
-      const hCrc = view.getUint32(19, false);
-      if (crc32(headerBytes.slice(0, 19)) !== hCrc) {
-         continue; // ヘッダCRC合わない！
+      const view = new DataView(headerBytes.buffer, headerBytes.byteOffset, headerBytes.byteLength);
+      const magic = view.getUint8(0);
+      if (magic !== 0xC6) {
+        log.push(`${pId}: magic mismatch (${magic.toString(16)})`);
+        continue; // "Magic" じゃないなら次！
       }
 
       // ヘッダが通ったらこのプロファイルでキマリ！✨
       debug.detectedProfileId = pId;
       debug.estimatedGridSize = profile.size;
-      const pIdx = view.getUint8(5);
-      const chunkIndex = view.getUint16(9, false);
-      const totalChunks = view.getUint16(11, false);
-      const payloadLength = view.getUint16(13, false);
-      const payloadChecksum = view.getUint32(15, false);
+      const pIdx = view.getUint8(1);
+      const chunkIndex = view.getUint16(2, false);
+      const totalChunks = view.getUint16(4, false);
+      const payloadLength = view.getUint16(6, false);
+      const payloadChecksum = view.getUint32(8, false);
 
       this.lastClockValue = clockVal;
 
@@ -132,7 +167,7 @@ export class ColorGridDecoder {
           if (!isReservedCell(x, y, profile)) {
             const pt = perspectiveTransform({ x: x + 0.5, y: y + 0.5 }, mat);
             debugSampled.push(pt);
-            const col = this.sampleColor(imageData, pt.x, pt.y);
+            const col = this.sampleColor(imageData, pt.x, pt.y, sampleRadius);
             if (col) {
               payload3bit.push(this.matchColor(col, readPalette));
             } else {
@@ -169,7 +204,8 @@ export class ColorGridDecoder {
       };
     }
 
-    return { ok: false, reason: "全プロファイル試したけどヘッダ解読できなかった💦", debug };
+    (this as any).debugLogs = log;
+    return { ok: false, reason: `全プロファイル試したけどヘッダ解読できなかった💦\nログ: ${log.join(" | ")}`, debug };
   }
 
   /**
@@ -231,10 +267,11 @@ export class ColorGridDecoder {
             if (this.checkRatio(stateCounts)) {
               // X中心を概算
               const center = x - Math.floor(stateCounts[4] + stateCounts[3] + stateCounts[2] / 2);
-              if (this.crossCheckVertical(imageData, center, y, stateCounts[2], isBlack)) {
+              const exactY = this.crossCheckVertical(imageData, center, y, stateCounts[2], isBlack);
+              if (exactY !== null) {
                 // 斜めチェックを1方向だけにするとかなくすとか。ここでは斜めチェックを緩く生かすか、とりあえず外す（もしくは非常に緩くする）。
                 // カメラだと本当に厳しいので、元の仕様に戻しつつmaxVarianceを大きめにするだけでも十分かもしれない。
-                centers.push({ x: center, y });
+                centers.push({ x: center, y: exactY });
               }
               currentState = 0;
               stateCounts = [0, 0, 0, 0, 0];
@@ -297,7 +334,7 @@ export class ColorGridDecoder {
     centerY: number,
     maxCount: number,
     isBlack: (i: number) => boolean
-  ): boolean {
+  ): number | null {
     const width = imageData.width;
     const height = imageData.height;
     
@@ -311,22 +348,24 @@ export class ColorGridDecoder {
       vCounts[2]++;
       y--;
     }
-    if (y < 0) return false;
+    if (y < 0) return null;
     
     // 次に内側の白 (vCounts[1])
     while (y >= 0 && !isBlack((y * width + centerX) * 4)) {
       vCounts[1]++;
       y--;
     }
-    if (y < 0 || vCounts[1] === 0) return false;
+    if (y < 0 || vCounts[1] === 0) return null;
     
     // 次に外枠の黒 (vCounts[0])
     while (y >= 0 && isBlack((y * width + centerX) * 4)) {
       vCounts[0]++;
       y--;
     }
-    if (vCounts[0] === 0) return false;
+    if (vCounts[0] === 0) return null;
     
+    const topY = y + 1; // 一番上の黒のY座標
+
     // 2. centerY + 1 から下にスキャン
     y = centerY + 1;
     // 中央の黒 (vCounts[2] のもう半分)
@@ -334,31 +373,37 @@ export class ColorGridDecoder {
       vCounts[2]++;
       y++;
     }
-    if (y >= height) return false;
+    if (y >= height) return null;
     
     // 内側の白 (vCounts[3])
     while (y < height && !isBlack((y * width + centerX) * 4)) {
       vCounts[3]++;
       y++;
     }
-    if (y >= height || vCounts[3] === 0) return false;
+    if (y >= height || vCounts[3] === 0) return null;
     
     // 外枠の黒 (vCounts[4])
     while (y < height && isBlack((y * width + centerX) * 4)) {
       vCounts[4]++;
       y++;
     }
-    if (vCounts[4] === 0) return false;
+    if (vCounts[4] === 0) return null;
     
+    const bottomY = y - 1; // 一番下の黒のY座標
+
     // 比率のチェック！
     const total = vCounts.reduce((a, b) => a + b, 0);
     // 水平のサイズと、垂直のサイズが著しく異なっている場合はファインダーではない（アスペクト比チェック）
     const hTotal = maxCount * 7 / 3; // 水平の推定トータル
     if (Math.abs(total - hTotal) > hTotal * 0.8) {
-      return false;
+      return null;
     }
     
-    return this.checkRatio(vCounts);
+    if (this.checkRatio(vCounts)) {
+      // 見つかった範囲の中心Yを返す！
+      return topY + (bottomY - topY) / 2;
+    }
+    return null;
   }
 
   private crossCheckDiagonal(
@@ -454,21 +499,22 @@ export class ColorGridDecoder {
    * 画像から色を吸い取るよ！
    * 1ピクセルだけだとノイズ入るから、中心の少し周りの平均(3x3)を取るのがミソ✨
    */
-  private sampleColor(imageData: ImageData, x: number, y: number): { r: number, g: number, b: number } | null {
+  private sampleColor(imageData: ImageData, x: number, y: number, sampleRadius: number = 1): { r: number, g: number, b: number } | null {
     const { width, height, data } = imageData;
     const px = Math.floor(x);
     const py = Math.floor(y);
-    if (px < 1 || px >= width - 1 || py < 1 || py >= height - 1) return null;
+    if (px < sampleRadius || px >= width - sampleRadius || py < sampleRadius || py >= height - sampleRadius) return null;
 
     let tr = 0, tg = 0, tb = 0;
-    // 3x3 の平均を取る
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
+    let count = 0;
+    for (let dy = -sampleRadius; dy <= sampleRadius; dy++) {
+      for (let dx = -sampleRadius; dx <= sampleRadius; dx++) {
         const i = ((py + dy) * width + (px + dx)) * 4;
         tr += data[i]; tg += data[i + 1]; tb += data[i + 2];
+        count++;
       }
     }
-    return { r: tr / 9, g: tg / 9, b: tb / 9 };
+    return { r: tr / count, g: tg / count, b: tb / count };
   }
 
   /**

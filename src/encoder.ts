@@ -166,37 +166,29 @@ export class ColorGridEncoder {
     // 今回のチャンクデータ準備
     const payloadBuffer = this.chunks[index] || new Uint8Array(0);
     
-    // Header構成 (23 bytes)
-    // magic: 0x43475458 (4)
-    // version: 1 (1)
+    // Header構成 (12 bytes)
+    // magic: 0xC6 (1)
     // profileId: XS=0, S=1, M=2, L=3, XL=4 (1)
-    // gridSize: profile.size (2)
-    // flags: 0 (1)
     // chunkIndex: index (2)
     // totalChunks: chunks.length (2)
     // payloadLength: payloadBuffer.length (2)
     // payloadChecksum: crc32 (4)
-    // headerChecksum: crc32 (4) // 自身より前の19bytesのcrc32
-    const header = new Uint8Array(23);
-    const view = new DataView(header.buffer);
-    view.setUint32(0, 0x43475458, false); // BigEndian
-    view.setUint8(4, 1);
+    const header = new Uint8Array(12);
+    const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+    view.setUint8(0, 0xC6);  // Magic baby✨
     const pIdx = ["XS", "S", "M", "L", "XL"].indexOf(this.options.profileId);
-    view.setUint8(5, pIdx >= 0 ? pIdx : 2); // Default to M(2)
-    view.setUint16(6, profile.size, false);
-    view.setUint8(8, 0); // flags
-    view.setUint16(9, index, false);
-    view.setUint16(11, this.chunks.length, false);
-    view.setUint16(13, payloadBuffer.length, false);
-    
+    view.setUint8(1, pIdx >= 0 ? pIdx : 2); // Default to M
+    view.setUint16(2, index, false);
+    view.setUint16(4, this.chunks.length, false);
+    view.setUint16(6, payloadBuffer.length, false);
     const pCrc = payloadBuffer.length > 0 ? crc32(payloadBuffer) : 0;
-    view.setUint32(15, pCrc, false);
-    
-    const hCrc = crc32(header.slice(0, 19));
-    view.setUint32(19, hCrc, false);
+    view.setUint32(8, pCrc, false);
+
+    // ヘッダに ReedSolomon をかける！(12 bytes parity => 合計24 bytes = 192 bits = 64 cells)
+    const encodedHeader = this.rs.encode(header, 12);
 
     // Headerを3bit化して描画
-    const header3bit = packTo3Bit(header);
+    const header3bit = packTo3Bit(encodedHeader);
     for (let y = 0; y < profile.finderSize; y++) {
       for (let x = profile.finderSize; x < profile.size - profile.finderSize; x++) {
         const hIdx = getHeaderCellIndex(x, y, profile);
