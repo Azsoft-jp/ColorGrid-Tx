@@ -41,6 +41,22 @@ export interface DecodedChunk {
   gridSize: number;
 }
 
+export interface PhaseLog {
+  phase:
+    | "finder"        // ファインダー検出
+    | "homography"    // ホモグラフィ生成
+    | "alignment"     // APスイープ
+    | "palette"       // 基準パレット読み取り
+    | "clock"         // 同期クロック読み取り
+    | "headerRS"      // ヘッダRSデコード
+    | "magic"         // Magicバイト照合
+    | "payloadCRC"    // ペイロードCRC照合
+    | "success";      // デコード成功
+  ok: boolean;
+  detail: string;    // 失敗理由や中間値の数値
+  durationMs: number;
+}
+
 export interface DecodeDebugInfo {
   finderPoints?: Point[];
   corners?: Point[];
@@ -50,6 +66,7 @@ export interface DecodeDebugInfo {
   estimatedGridSize?: number;
   estimatedCellSizePx?: number;
   crcOk?: boolean;
+  phaseLogs?: PhaseLog[];
 }
 
 export interface DecodeResult {

@@ -33,6 +33,58 @@ export default function App() {
   const [encStats, setEncStats] = useState({ totalChunks: 0 });
   const [currentTxIndex, setCurrentTxIndex] = useState(0); // 現在送信中のチャンクインデックス✨
 
+  // 🔄 双方向インタラクティブ同期モード（Interactive Feedback Sync）用の鬼ヤバパラメータたち！💖
+  const [interactiveModeTx, setInteractiveModeTx] = useState(false); // 送信側
+  const [interactiveModeRx, setInteractiveModeRx] = useState(false); // 受信側
+  const [isAckCameraOn, setIsAckCameraOn] = useState(false); // 送信側のACK監視カメラ稼働
+  const [ackDebugInfo, setAckDebugInfo] = useState<DecodeDebugInfo | null>(null); // ACK監視カメラ用デバッグ
+  const [isAckConnected, setIsAckConnected] = useState(false); // 相手のフィードバックコードを捉えているか！🔗✨
+  const [ackMsg, setAckMsg] = useState(""); // デコードされた相手からの要求メッセージ
+  const [selectiveNackListStr, setSelectiveNackListStr] = useState(""); // 送信側が独自（ARQ無効時など）にループ再送するためのチャンクリスト(CSV)だよ！💖
+  const [showNackFeedbackRx, setShowNackFeedbackRx] = useState(false); // 受信側がARQ無効でも欠落チャンクリストコードを逆送信(1枚表示)したい時のトグル！✨
+
+  // 🔄 送信データ更新用の神ヘルパー関数（関数宣言型にすることで安全にホイストさせるみ！💖）
+  function updateEncData() {
+    if (!encoder) return;
+    encoder.forceChunkIndex = null;
+    encoder.forceChunkList = null;
+    setSelectiveNackListStr(""); // データを変更した時は自動的に再送対象をクリアするよ！✨
+    if (payloadType === "text") {
+      const data = new TextEncoder().encode(sendText);
+      const meta: PayloadMeta = { type: "text" };
+      encoder.setData(data, meta);
+    } else if (payloadType === "file" && fileData && fileMeta) {
+      encoder.setData(fileData, fileMeta);
+    } else {
+      encoder.setData(new Uint8Array(0));
+    }
+    setEncStats({ totalChunks: encoder.getStats().totalChunks });
+    encoder.renderChunk(isStreaming ? encoder.currentChunkIndex : 0);
+  }
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    if (!e.target.files || !e.target.files[0]) return;
+    const file = e.target.files[0];
+    const buffer = await file.arrayBuffer();
+    const meta: PayloadMeta = { type: "file", filename: file.name, mimeType: file.type };
+    setFileData(new Uint8Array(buffer));
+    setFileMeta(meta);
+    setPayloadType("file");
+  }
+
+  function toggleStreaming() {
+    if (!encoder) return;
+    encoder.forceChunkIndex = null;
+    encoder.forceChunkList = null;
+    if (isStreaming) {
+      encoder.stopStreaming();
+    } else {
+      updateEncData();
+      encoder.startStreaming(fps);
+    }
+    setIsStreaming(!isStreaming);
+  }
+
   useEffect(() => {
     let enc: ColorGridEncoder | null = null;
     if (encCanvasRef.current && !encoder) {
@@ -83,47 +135,6 @@ export default function App() {
     }
   }, [selectiveNackListStr, encoder]);
 
-  const updateEncData = () => {
-    if (!encoder) return;
-    encoder.forceChunkIndex = null;
-    encoder.forceChunkList = null;
-    setSelectiveNackListStr(""); // データを変更した時は自動的に再送対象をクリアするよ！✨
-    if (payloadType === "text") {
-      const data = new TextEncoder().encode(sendText);
-      const meta: PayloadMeta = { type: "text" };
-      encoder.setData(data, meta);
-    } else if (payloadType === "file" && fileData && fileMeta) {
-      encoder.setData(fileData, fileMeta);
-    } else {
-      encoder.setData(new Uint8Array(0));
-    }
-    setEncStats({ totalChunks: encoder.getStats().totalChunks });
-    encoder.renderChunk(isStreaming ? encoder.currentChunkIndex : 0);
-  };
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files || !e.target.files[0]) return;
-    const file = e.target.files[0];
-    const buffer = await file.arrayBuffer();
-    const meta: PayloadMeta = { type: "file", filename: file.name, mimeType: file.type };
-    setFileData(new Uint8Array(buffer));
-    setFileMeta(meta);
-    setPayloadType("file");
-  };
-
-  const toggleStreaming = () => {
-    if (!encoder) return;
-    encoder.forceChunkIndex = null;
-    encoder.forceChunkList = null;
-    if (isStreaming) {
-      encoder.stopStreaming();
-    } else {
-      updateEncData();
-      encoder.startStreaming(fps);
-    }
-    setIsStreaming(!isStreaming);
-  };
-
   // ================= RECEIVE MODE =================
   const videoRef = useRef<HTMLVideoElement>(null);
   const decCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -134,16 +145,6 @@ export default function App() {
   const [chunksReceived, setChunksReceived] = useState<Record<number, Uint8Array>>({});
   const [totalRxChunks, setTotalRxChunks] = useState(1); // デコード時にヘッダから自動取得するよお！
   const decoderRef = useRef(new ColorGridDecoder());
-
-  // 🔄 双方向インタラクティブ同期モード（Interactive Feedback Sync）用の鬼ヤバパラメータたち！💖
-  const [interactiveModeTx, setInteractiveModeTx] = useState(false); // 送信側
-  const [interactiveModeRx, setInteractiveModeRx] = useState(false); // 受信側
-  const [isAckCameraOn, setIsAckCameraOn] = useState(false); // 送信側のACK監視カメラ稼働
-  const [ackDebugInfo, setAckDebugInfo] = useState<DecodeDebugInfo | null>(null); // ACK監視カメラ用デバッグ
-  const [isAckConnected, setIsAckConnected] = useState(false); // 相手のフィードバックコードを捉えているか！🔗✨
-  const [ackMsg, setAckMsg] = useState(""); // デコードされた相手からの要求メッセージ
-  const [selectiveNackListStr, setSelectiveNackListStr] = useState(""); // 送信側が独自（ARQ無効時など）にループ再送するためのチャンクリスト(CSV)だよ！💖
-  const [showNackFeedbackRx, setShowNackFeedbackRx] = useState(false); // 受信側がARQ無効でも欠落チャンクリストコードを逆送信(1枚表示)したい時のトグル！✨
 
   // 双方向制御用Refs! 🛠
   const ackVideoRef = useRef<HTMLVideoElement>(null);

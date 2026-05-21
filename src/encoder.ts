@@ -217,10 +217,22 @@ export class ColorGridEncoder {
 
     // 予約領域以外にデータセルを順番に配置
     let dIdx = 0;
+    const totalChunks = this.chunks.length;
+    let seed = (index * 1000003 + totalChunks * 7) >>> 0;
+    const nextRand = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed % 8; // 0〜7のパレットインデックス
+    };
+
     for (let y = 0; y < profile.size; y++) {
       for (let x = 0; x < profile.size; x++) {
         if (!isReservedCell(x, y, profile)) {
-          const val = dIdx < payload3bit.length ? payload3bit[dIdx] : 7; // 余らすところは白(7)
+          let val = 7;
+          if (dIdx < payload3bit.length) {
+            val = payload3bit[dIdx];
+          } else {
+            val = nextRand();
+          }
           drawCell(x, y, val);
           dIdx++;
         }
