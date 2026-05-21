@@ -300,8 +300,8 @@ export class ColorGridDecoder {
         // クラスタの直前の点との距離を見る
         const lastPt = cluster[cluster.length - 1];
         const dist = Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y);
-        // 同じファインダー内のピクセル群をまとめる
-        if (dist < 80) {
+        // マージ距離を30pxに狭めて偽ファインダーが本物クラスタを歪めるのを防ぐよ✨
+        if (dist < 30) {
           cluster.push(pt);
           found = true;
           break;
@@ -480,13 +480,13 @@ export class ColorGridDecoder {
     return this.checkRatio(vCounts);
   }
 
-  // 1:1:3:1:1 の比率許容チェック (許容誤差100%くらいに緩める！)
+  // 1:1:3:1:1 の比率許容チェック (許容誤差を100%程度に引き締めて、データ領域の誤検知を防ぐよ！✨)
   private checkRatio(counts: number[]): boolean {
     const total = counts.reduce((a, b) => a + b, 0);
     if (total < 7) return false;
     const moduleSize = total / 7;
-    // ブレやすいカメラ映像のため、誤差許容をガッツリ広げる
-    const maxVariance = moduleSize * 1.5;
+    // ブレやすいカメラ映像のため調整しつつ、1.0倍（100%）に引き締める！
+    const maxVariance = moduleSize * 1.0;
 
     return Math.abs(moduleSize - counts[0]) < maxVariance &&
            Math.abs(moduleSize - counts[1]) < maxVariance &&
@@ -501,8 +501,8 @@ export class ColorGridDecoder {
    */
   private sampleColor(imageData: ImageData, x: number, y: number, sampleRadius: number = 1): { r: number, g: number, b: number } | null {
     const { width, height, data } = imageData;
-    const px = Math.floor(x);
-    const py = Math.floor(y);
+    const px = Math.round(x);
+    const py = Math.round(y);
     if (px < sampleRadius || px >= width - sampleRadius || py < sampleRadius || py >= height - sampleRadius) return null;
 
     let tr = 0, tg = 0, tb = 0;
