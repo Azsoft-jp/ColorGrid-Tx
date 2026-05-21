@@ -100,6 +100,7 @@ export function packTo3Bit(data: Uint8Array): Uint8Array {
       bitCount -= 3;
       out.push((bitBuffer >>> bitCount) & 0x7);
     }
+    bitBuffer &= (1 << bitCount) - 1;
   }
   if (bitCount > 0) {
     out.push((bitBuffer << (3 - bitCount)) & 0x7);
@@ -124,6 +125,7 @@ export function unpackFrom3Bit(data: Uint8Array, originalByteLength: number): Ui
         out[outIdx++] = (bitBuffer >>> bitCount) & 0xFF;
       }
     }
+    bitBuffer &= (1 << bitCount) - 1;
   }
   return out;
 }

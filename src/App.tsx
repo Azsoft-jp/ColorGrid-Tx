@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { Maximize2, Minimize2 } from 'lucide-react';
 import { ColorGridEncoder } from './encoder';
 import { ColorGridDecoder } from './decoder';
 import { GRID_PROFILES, GridProfileId, DecodeDebugInfo, PayloadMeta } from './types';
@@ -28,6 +29,7 @@ export default function App() {
   const [marginCells, setMarginCells] = useState(4);
   const [fps, setFps] = useState(10);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isMaximized, setIsMaximized] = useState(false);
   const [encStats, setEncStats] = useState({ totalChunks: 0 });
 
   useEffect(() => {
@@ -268,8 +270,10 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const isMaximizedSend = mode === "SEND" && isMaximized;
+
   return (
-    <div className="fixed inset-0 bg-[#0f1115] text-[#d1d5db] font-sans flex flex-col p-4 select-none lg:overflow-hidden overflow-y-auto">
+    <div className={`fixed inset-0 bg-[#0f1115] text-[#d1d5db] font-sans flex flex-col select-none lg:overflow-hidden overflow-y-auto ${isMaximizedSend ? "p-0" : "p-4"}`}>
       {testResult && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-[#1c2128] border border-[#374151] rounded-xl p-6 shadow-2xl max-w-md w-full flex flex-col">
@@ -303,134 +307,138 @@ export default function App() {
       )}
 
       {/* Header Section */}
-      <header className="flex flex-col md:flex-row items-center justify-between border-b border-[#2d333d] pb-4 mb-4 gap-4 shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-gradient-to-br from-cyan-500 to-blue-600 rounded flex items-center justify-center border border-white/20 shadow-[0_0_15px_rgba(6,182,212,0.3)] shrink-0">
-            <div className="grid grid-cols-2 gap-0.5">
-              <div className="w-2 h-2 bg-white"></div><div className="w-2 h-2 bg-red-500"></div>
-              <div className="w-2 h-2 bg-green-500"></div><div className="w-2 h-2 bg-blue-500"></div>
+      {!isMaximizedSend && (
+        <header className="flex flex-col md:flex-row items-center justify-between border-b border-[#2d333d] pb-4 mb-4 gap-4 shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-gradient-to-br from-cyan-500 to-blue-600 rounded flex items-center justify-center border border-white/20 shadow-[0_0_15px_rgba(6,182,212,0.3)] shrink-0">
+              <div className="grid grid-cols-2 gap-0.5">
+                <div className="w-2 h-2 bg-white"></div><div className="w-2 h-2 bg-red-500"></div>
+                <div className="w-2 h-2 bg-green-500"></div><div className="w-2 h-2 bg-blue-500"></div>
+              </div>
+            </div>
+            <div>
+              <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2 flex-wrap">
+                ColorGrid-Tx 
+                <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 bg-cyan-900/40 text-cyan-400 rounded border border-cyan-800">v1.1.0-alpha</span>
+              </h1>
+              <p className="text-[11px] text-gray-500 font-mono">{t.subtitle}</p>
             </div>
           </div>
-          <div>
-            <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2 flex-wrap">
-              ColorGrid-Tx 
-              <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 bg-cyan-900/40 text-cyan-400 rounded border border-cyan-800">v1.1.0-alpha</span>
-            </h1>
-            <p className="text-[11px] text-gray-500 font-mono">{t.subtitle}</p>
-          </div>
-        </div>
-        
-        <div className="flex items-center gap-2 flex-wrap justify-center">
-          <select
-            value={lang}
-            onChange={e => setLang(e.target.value as Language)}
-            className="bg-[#1c1f26] border border-[#374151] rounded px-3 py-1.5 text-xs font-semibold text-white outline-none cursor-pointer hover:bg-[#2d333d] shadow-md"
-          >
-            <option value="ja">🇯🇵 日本語</option>
-            <option value="en">🇺🇸 EN</option>
-            <option value="zh">🇨🇳 中文</option>
-            <option value="ko">🇰🇷 한국어</option>
-            <option value="ru">🇷🇺 РУС</option>
-          </select>
-          <button onClick={runSelfTest} className="px-4 py-1.5 bg-[#1c1f26] border border-[#374151] rounded text-xs font-semibold hover:bg-[#2d333d] transition-colors flex items-center gap-2 text-white shadow-md">
-            <span className="w-2 h-2 rounded-full bg-yellow-500 inline-block"></span> {t.selfTest}
-          </button>
           
-          <div className="flex bg-[#1c1f26] border border-[#374151] rounded p-0.5 shadow-md">
-            <button
-              onClick={() => setMode("SEND")}
-              className={`px-4 py-1.5 rounded text-xs font-bold transition-colors ${mode === "SEND" ? "bg-cyan-600 text-white shadow-lg shadow-cyan-900/20" : "text-gray-400 hover:text-white"}`}
+          <div className="flex items-center gap-2 flex-wrap justify-center">
+            <select
+              value={lang}
+              onChange={e => setLang(e.target.value as Language)}
+              className="bg-[#1c1f26] border border-[#374151] rounded px-3 py-1.5 text-xs font-semibold text-white outline-none cursor-pointer hover:bg-[#2d333d] shadow-md"
             >
-              {t.encMode}
+              <option value="ja">🇯🇵 日本語</option>
+              <option value="en">🇺🇸 EN</option>
+              <option value="zh">🇨🇳 中文</option>
+              <option value="ko">🇰🇷 한국어</option>
+              <option value="ru">🇷🇺 РУС</option>
+            </select>
+            <button onClick={runSelfTest} className="px-4 py-1.5 bg-[#1c1f26] border border-[#374151] rounded text-xs font-semibold hover:bg-[#2d333d] transition-colors flex items-center gap-2 text-white shadow-md">
+              <span className="w-2 h-2 rounded-full bg-yellow-500 inline-block"></span> {t.selfTest}
             </button>
-            <button
-              onClick={() => setMode("RECEIVE")}
-              className={`px-4 py-1.5 rounded text-xs font-bold transition-colors ${mode === "RECEIVE" ? "bg-pink-600 text-white shadow-lg shadow-pink-900/20" : "text-gray-400 hover:text-white"}`}
-            >
-              {t.decMode}
-            </button>
+            
+            <div className="flex bg-[#1c1f26] border border-[#374151] rounded p-0.5 shadow-md">
+              <button
+                onClick={() => setMode("SEND")}
+                className={`px-4 py-1.5 rounded text-xs font-bold transition-colors ${mode === "SEND" ? "bg-cyan-600 text-white shadow-lg shadow-cyan-900/20" : "text-gray-400 hover:text-white"}`}
+              >
+                {t.encMode}
+              </button>
+              <button
+                onClick={() => setMode("RECEIVE")}
+                className={`px-4 py-1.5 rounded text-xs font-bold transition-colors ${mode === "RECEIVE" ? "bg-pink-600 text-white shadow-lg shadow-pink-900/20" : "text-gray-400 hover:text-white"}`}
+              >
+                {t.decMode}
+              </button>
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
+      )}
 
       {/* Main Operation Area */}
       <main className="flex-1 min-h-0 overflow-y-auto lg:overflow-hidden pb-2 lg:pb-0">
         {mode === "SEND" && (
-          <div className="grid lg:grid-cols-2 gap-4 h-auto lg:h-full lg:min-h-0">
+          <div className={`grid ${isMaximized ? "grid-cols-1 h-full" : "lg:grid-cols-2"} gap-4 h-auto lg:h-full lg:min-h-0`}>
             {/* Left: Encoder Controls */}
-            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 overflow-y-auto relative h-[500px] lg:h-full shrink-0 lg:shrink">
-              <div className="flex items-center justify-between mb-4 shrink-0">
-                <span className="text-[10px] font-bold text-cyan-400 tracking-widest uppercase">{t.encoderTitle}</span>
-                <span className="text-[10px] font-mono text-gray-500 uppercase">Status: {isStreaming ? t.statusTransmitting : t.statusStandby}</span>
-              </div>
+            {!isMaximized && (
+              <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 overflow-y-auto relative h-[500px] lg:h-full shrink-0 lg:shrink">
+                <div className="flex items-center justify-between mb-4 shrink-0">
+                  <span className="text-[10px] font-bold text-cyan-400 tracking-widest uppercase">{t.encoderTitle}</span>
+                  <span className="text-[10px] font-mono text-gray-500 uppercase">Status: {isStreaming ? t.statusTransmitting : t.statusStandby}</span>
+                </div>
 
-              <div className="space-y-4 flex-1">
-                <div className="flex flex-col gap-1">
-                  <label className="text-[10px] font-bold uppercase text-gray-500">{t.payloadSourceText}</label>
-                  <textarea 
-                    className="bg-[#1c2128] border border-[#374151] rounded p-3 text-sm text-white focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 outline-none transition-all placeholder-gray-600"
-                    rows={3}
-                    value={sendText}
-                    onChange={e => { setPayloadType("text"); setSendText(e.target.value); }}
-                  />
-                  {payloadType === "text" && sendText.startsWith("data:image/") && (
-                    <div className="mt-2 bg-black/40 rounded p-2 flex items-center justify-center border border-[#2d333d]">
-                      <img src={sendText} alt="Payload Preview" className="max-h-24 object-contain rounded" />
+                <div className="space-y-4 flex-1">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] font-bold uppercase text-gray-500">{t.payloadSourceText}</label>
+                    <textarea 
+                      className="bg-[#1c2128] border border-[#374151] rounded p-3 text-sm text-white focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 outline-none transition-all placeholder-gray-600"
+                      rows={3}
+                      value={sendText}
+                      onChange={e => { setPayloadType("text"); setSendText(e.target.value); }}
+                    />
+                    {payloadType === "text" && sendText.startsWith("data:image/") && (
+                      <div className="mt-2 bg-black/40 rounded p-2 flex items-center justify-center border border-[#2d333d]">
+                        <img src={sendText} alt="Payload Preview" className="max-h-24 object-contain rounded" />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] font-bold uppercase text-gray-500">{t.fileIngestion}</label>
+                    <input type="file" onChange={handleFileChange} className="text-xs text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-[#2d333d] file:text-gray-200 hover:file:bg-[#374151] cursor-pointer" />
+                    {payloadType === "file" && fileData && fileMeta && fileMeta.mimeType?.startsWith("image/") && (
+                      <div className="mt-2 bg-black/40 rounded p-2 flex items-center justify-center border border-[#2d333d]">
+                        <img src={URL.createObjectURL(new Blob([fileData], { type: fileMeta.mimeType }))} alt="File Preview" className="max-h-24 object-contain rounded" />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[10px] font-bold uppercase text-gray-500">{t.profile}</label>
+                      <select className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={profileId} onChange={e => setProfileId(e.target.value as GridProfileId)}>
+                        {Object.keys(GRID_PROFILES).map(k => <option key={k} value={k}>{GRID_PROFILES[k as GridProfileId].name}</option>)}
+                      </select>
                     </div>
-                  )}
-                </div>
-
-                <div className="flex flex-col gap-1">
-                  <label className="text-[10px] font-bold uppercase text-gray-500">{t.fileIngestion}</label>
-                  <input type="file" onChange={handleFileChange} className="text-xs text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-[#2d333d] file:text-gray-200 hover:file:bg-[#374151] cursor-pointer" />
-                  {payloadType === "file" && fileData && fileMeta && fileMeta.mimeType?.startsWith("image/") && (
-                    <div className="mt-2 bg-black/40 rounded p-2 flex items-center justify-center border border-[#2d333d]">
-                      <img src={URL.createObjectURL(new Blob([fileData], { type: fileMeta.mimeType }))} alt="File Preview" className="max-h-24 object-contain rounded" />
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[10px] font-bold uppercase text-gray-500">{t.cellSize}</label>
+                      <select className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={cellSize} onChange={e => setCellSize(Number(e.target.value))}>
+                        {[3, 4, 5, 6, 7, 8].map(v => <option key={v} value={v}>{v}px</option>)}
+                      </select>
                     </div>
-                  )}
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="flex flex-col gap-1">
-                    <label className="text-[10px] font-bold uppercase text-gray-500">{t.profile}</label>
-                    <select className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={profileId} onChange={e => setProfileId(e.target.value as GridProfileId)}>
-                      {Object.keys(GRID_PROFILES).map(k => <option key={k} value={k}>{GRID_PROFILES[k as GridProfileId].name}</option>)}
-                    </select>
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-[10px] font-bold uppercase text-gray-500">{t.cellSize}</label>
-                    <select className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={cellSize} onChange={e => setCellSize(Number(e.target.value))}>
-                      {[3, 4, 5, 6, 7, 8].map(v => <option key={v} value={v}>{v}px</option>)}
-                    </select>
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-[10px] font-bold uppercase text-gray-500">{t.marginCells}</label>
-                    <select className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={marginCells} onChange={e => setMarginCells(Number(e.target.value))}>
-                      {[2, 4, 6, 8].map(v => <option key={v} value={v}>{v} cells</option>)}
-                    </select>
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-[10px] font-bold uppercase text-gray-500">{t.syncFps}</label>
-                    <input type="number" className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={fps} onChange={e => setFps(Number(e.target.value))} />
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[10px] font-bold uppercase text-gray-500">{t.marginCells}</label>
+                      <select className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={marginCells} onChange={e => setMarginCells(Number(e.target.value))}>
+                        {[2, 4, 6, 8].map(v => <option key={v} value={v}>{v} cells</option>)}
+                      </select>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[10px] font-bold uppercase text-gray-500">{t.syncFps}</label>
+                      <input type="number" className="bg-[#1c2128] border border-[#374151] rounded px-2 py-1.5 text-xs text-white outline-none" value={fps} onChange={e => setFps(Number(e.target.value))} />
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="mt-4 shrink-0">
-                <button
-                  onClick={toggleStreaming}
-                  className={`w-full py-3 text-xs font-bold rounded uppercase tracking-widest transition-all
-                    ${isStreaming 
-                      ? "bg-red-600/10 border border-red-600/50 text-red-500 hover:bg-red-600/20 shadow-[0_0_10px_rgba(239,68,68,0.2)]" 
-                      : "bg-green-600/10 border border-green-600/50 text-green-500 hover:bg-green-600/20 shadow-[0_0_10px_rgba(34,197,94,0.2)]"}`}
-                >
-                  {isStreaming ? t.stopTransmission : t.startTransmission}
-                </button>
-              </div>
-            </section>
+                <div className="mt-4 shrink-0">
+                  <button
+                    onClick={toggleStreaming}
+                    className={`w-full py-3 text-xs font-bold rounded uppercase tracking-widest transition-all
+                      ${isStreaming 
+                        ? "bg-red-600/10 border border-red-600/50 text-red-500 hover:bg-red-600/20 shadow-[0_0_10px_rgba(239,68,68,0.2)]" 
+                        : "bg-green-600/10 border border-green-600/50 text-green-500 hover:bg-green-600/20 shadow-[0_0_10px_rgba(34,197,94,0.2)]"}`}
+                  >
+                    {isStreaming ? t.stopTransmission : t.startTransmission}
+                  </button>
+                </div>
+              </section>
+            )}
 
             {/* Right: Encoder Canvas output */}
-            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-[400px] lg:h-full">
+            <section className={`bg-[#15181e] flex flex-col p-4 relative ${isMaximized ? "border-0 rounded-none h-full w-full" : "rounded-xl border border-[#2d333d] h-[400px] lg:h-full"}`}>
               <div className="flex items-center justify-between mb-3 shrink-0 gap-2 flex-wrap">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-[10px] font-bold text-gray-500 uppercase pt-1">{t.matrixOutput}</span>
@@ -448,12 +456,31 @@ export default function App() {
                     </span>
                   )}
                 </div>
-                <button
-                  onClick={handleSaveImage}
-                  className="px-3 py-1 bg-[#2d333d] hover:bg-[#374151] rounded text-[10px] font-bold text-gray-300 transition-colors border border-[#4b5563]"
-                >
-                  {t.saveImage}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={toggleStreaming}
+                    className={`px-3 py-1 bg-[#2d333d] hover:bg-[#374151] rounded text-[10px] font-bold transition-all border border-[#4b5563] cursor-pointer
+                      ${isStreaming 
+                        ? "bg-red-950/40 hover:bg-red-900/60 text-red-400 border-red-800/80 shadow-[0_0_10px_rgba(239,68,68,0.15)] animate-pulse" 
+                        : "bg-green-950/30 hover:bg-green-900/55 text-green-400 border-green-800/80 shadow-[0_0_10px_rgba(34,197,94,0.15)]"}`}
+                  >
+                    {isStreaming ? t.stopTransmission : t.startTransmission}
+                  </button>
+                  <button
+                    onClick={handleSaveImage}
+                    className="px-3 py-1 bg-[#2d333d] hover:bg-[#374151] rounded text-[10px] font-bold text-gray-300 transition-colors border border-[#4b5563] cursor-pointer"
+                  >
+                    {t.saveImage}
+                  </button>
+                  <button
+                    onClick={() => setIsMaximized(!isMaximized)}
+                    className="px-3 py-1 bg-[#1a2d3d] hover:bg-[#203a4f] text-cyan-400 rounded text-[10px] font-bold border border-cyan-800/80 flex items-center gap-1.5 shadow-md cursor-pointer"
+                    title={isMaximized ? t.normalMode : t.theaterMode}
+                  >
+                    {isMaximized ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                    <span>{isMaximized ? t.normalMode : t.theaterMode}</span>
+                  </button>
+                </div>
               </div>
               
               <div className="flex-1 bg-black rounded border border-[#2d333d] flex items-center justify-center p-2 relative group overflow-hidden">

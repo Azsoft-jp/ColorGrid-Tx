@@ -232,6 +232,8 @@ export class ColorGridDecoder {
               // X中心を概算
               const center = x - Math.floor(stateCounts[4] + stateCounts[3] + stateCounts[2] / 2);
               if (this.crossCheckVertical(imageData, center, y, stateCounts[2], isBlack)) {
+                // 斜めチェックを1方向だけにするとかなくすとか。ここでは斜めチェックを緩く生かすか、とりあえず外す（もしくは非常に緩くする）。
+                // カメラだと本当に厳しいので、元の仕様に戻しつつmaxVarianceを大きめにするだけでも十分かもしれない。
                 centers.push({ x: center, y });
               }
               currentState = 0;
@@ -261,8 +263,8 @@ export class ColorGridDecoder {
         // クラスタの直前の点との距離を見る
         const lastPt = cluster[cluster.length - 1];
         const dist = Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y);
-        // ファインダーのサイズはある程度幅広いので、少し余裕をもたせる
-        if (dist < 40) {
+        // 同じファインダー内のピクセル群をまとめる
+        if (dist < 80) {
           cluster.push(pt);
           found = true;
           break;
@@ -359,13 +361,87 @@ export class ColorGridDecoder {
     return this.checkRatio(vCounts);
   }
 
+  private crossCheckDiagonal(
+    imageData: ImageData,
+    centerX: number,
+    centerY: number,
+    maxCount: number,
+    isBlack: (i: number) => boolean,
+    dx: number,
+    dy: number
+  ): boolean {
+    const width = imageData.width;
+    const height = imageData.height;
+    
+    const vCounts = [0, 0, 0, 0, 0];
+    
+    let x = Math.floor(centerX);
+    let y = Math.floor(centerY);
+    
+    // 1. 上(マイナス方向)へスキャン
+    while (x >= 0 && y >= 0 && x < width && y < height && isBlack((y * width + x) * 4)) {
+      vCounts[2]++;
+      x -= dx;
+      y -= dy;
+    }
+    if (x < 0 || y < 0 || x >= width || y >= height) return false;
+    
+    while (x >= 0 && y >= 0 && x < width && y < height && !isBlack((y * width + x) * 4)) {
+      vCounts[1]++;
+      x -= dx;
+      y -= dy;
+    }
+    if (x < 0 || y < 0 || x >= width || y >= height || vCounts[1] === 0) return false;
+    
+    while (x >= 0 && y >= 0 && x < width && y < height && isBlack((y * width + x) * 4)) {
+      vCounts[0]++;
+      x -= dx;
+      y -= dy;
+    }
+    if (vCounts[0] === 0) return false;
+    
+    // 2. 下(プラス方向)へスキャン
+    x = Math.floor(centerX) + dx;
+    y = Math.floor(centerY) + dy;
+    
+    while (x >= 0 && y >= 0 && x < width && y < height && isBlack((y * width + x) * 4)) {
+      vCounts[2]++;
+      x += dx;
+      y += dy;
+    }
+    if (x < 0 || y < 0 || x >= width || y >= height) return false;
+    
+    while (x >= 0 && y >= 0 && x < width && y < height && !isBlack((y * width + x) * 4)) {
+      vCounts[3]++;
+      x += dx;
+      y += dy;
+    }
+    if (x < 0 || y < 0 || x >= width || y >= height || vCounts[3] === 0) return false;
+    
+    while (x >= 0 && y >= 0 && x < width && y < height && isBlack((y * width + x) * 4)) {
+      vCounts[4]++;
+      x += dx;
+      y += dy;
+    }
+    if (vCounts[4] === 0) return false;
+    
+    const total = vCounts.reduce((a, b) => a + b, 0);
+    // 斜め方向は少し長いので、係数を大きめにとる
+    const hTotal = maxCount * 7 / 3 * Math.SQRT2;
+    if (Math.abs(total - hTotal) > hTotal * 0.8) {
+      return false;
+    }
+    
+    return this.checkRatio(vCounts);
+  }
+
   // 1:1:3:1:1 の比率許容チェック (許容誤差100%くらいに緩める！)
   private checkRatio(counts: number[]): boolean {
     const total = counts.reduce((a, b) => a + b, 0);
     if (total < 7) return false;
     const moduleSize = total / 7;
     // ブレやすいカメラ映像のため、誤差許容をガッツリ広げる
-    const maxVariance = moduleSize * 1.2;
+    const maxVariance = moduleSize * 1.5;
 
     return Math.abs(moduleSize - counts[0]) < maxVariance &&
            Math.abs(moduleSize - counts[1]) < maxVariance &&

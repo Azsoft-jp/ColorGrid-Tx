@@ -41,7 +41,9 @@ export const translations = {
     recovered: "Recovered",
     time: "Time",
     saveImage: "SAVE IMAGE",
-    downloadPayload: "DOWNLOAD PAYLOAD"
+    downloadPayload: "DOWNLOAD PAYLOAD",
+    theaterMode: "THEATER MODE",
+    normalMode: "NORMAL MODE"
   },
   ja: {
     subtitle: "光学式ビット転送プロトコル / Pure TS",
@@ -83,7 +85,9 @@ export const translations = {
     recovered: "復元",
     time: "時間",
     saveImage: "画像を保存",
-    downloadPayload: "ペイロードをDL"
+    downloadPayload: "ペイロードをDL",
+    theaterMode: "シアターモード",
+    normalMode: "通常モード"
   },
   zh: {
     subtitle: "光学比特传输协议 / 纯 TS",
@@ -125,7 +129,9 @@ export const translations = {
     recovered: "恢复",
     time: "时间",
     saveImage: "保存图片",
-    downloadPayload: "下载数据"
+    downloadPayload: "下载数据",
+    theaterMode: "影院模式",
+    normalMode: "普通模式"
   },
   ko: {
     subtitle: "광학 비트 전송 프로토콜 / 순수 TS",
@@ -167,7 +173,9 @@ export const translations = {
     recovered: "복구됨",
     time: "시간",
     saveImage: "이미지 저장",
-    downloadPayload: "페이로드 다운로드"
+    downloadPayload: "페이로드 다운로드",
+    theaterMode: "극장 모드",
+    normalMode: "일반 모드"
   },
   ru: {
     subtitle: "ОПТИЧЕСКИЙ ПРОТОКОЛ ПЕРЕДАЧИ БИТ / ЧИСТЫЙ TS",
@@ -209,6 +217,8 @@ export const translations = {
     recovered: "Восстановлено",
     time: "Время",
     saveImage: "СОХРАНИТЬ ИЗОБР.",
-    downloadPayload: "СКАЧАТЬ ДАННЫЕ"
+    downloadPayload: "СКАЧАТЬ ДАННЫЕ",
+    theaterMode: "РЕЖИМ ТЕАТРА",
+    normalMode: "ОБЫЧНЫЙ РЕЖИМ"
   }
 };
