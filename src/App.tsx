@@ -31,11 +31,17 @@ export default function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
   const [encStats, setEncStats] = useState({ totalChunks: 0 });
+  const [currentTxIndex, setCurrentTxIndex] = useState(0); // 現在送信中のチャンクインデックス✨
 
   useEffect(() => {
     let enc: ColorGridEncoder | null = null;
     if (encCanvasRef.current && !encoder) {
       enc = new ColorGridEncoder(encCanvasRef.current);
+      // 送信フレームが変わるたびにインデックスを受け取るよ！💖
+      enc.onChunkChange = (idx, total) => {
+        setCurrentTxIndex(idx);
+        setEncStats({ totalChunks: total });
+      };
       setEncoder(enc);
     }
     return () => {
@@ -96,9 +102,21 @@ export default function App() {
   const [decPayload, setDecPayload] = useState<Uint8Array | null>(null);
   const [debugInfo, setDebugInfo] = useState<DecodeDebugInfo | null>(null);
   const [chunksReceived, setChunksReceived] = useState<Record<number, Uint8Array>>({});
+  const [awaitingChunkIndex, setAwaitingChunkIndex] = useState(0); // 💖 絶賛待機中のターゲット・チャンク！
+  const [totalRxChunks, setTotalRxChunks] = useState(1); // デコード時にヘッダから自動取得するよお！
   const decoderRef = useRef(new ColorGridDecoder());
 
+  // 受信バッファなどを初期化するリセッターだよ！✨
+  const resetReceiver = () => {
+    setChunksReceived({});
+    setAwaitingChunkIndex(0);
+    setDecOutputText("");
+    setDecPayload(null);
+    setTotalRxChunks(1);
+  };
+
   const startCamera = async () => {
+    resetReceiver(); // 起動時にクリアして、新鮮なデータを受信できるようにする💖
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }
@@ -174,24 +192,46 @@ export default function App() {
                 }
 
                 if (res.ok && res.chunk) {
-                  const { chunkIndex, totalChunks, payload, profileId: pId, gridSize } = res.chunk;
+                  const { chunkIndex, totalChunks, payload } = res.chunk;
+                  setTotalRxChunks(totalChunks);
+
                   setChunksReceived(prev => {
                     const next = { ...prev, [chunkIndex]: payload };
                     
                     // 全部揃ったかの簡易確認
                     if (Object.keys(next).length >= totalChunks) {
-                       // 結合（今回は順番保証や完全結合は端折ってるけど大枠で！）
                        let totalLen = 0;
-                       for (let i=0; i<totalChunks; i++) totalLen += next[i].length;
+                       for (let i = 0; i < totalChunks; i++) {
+                         if (next[i]) totalLen += next[i].length;
+                       }
                        const resultData = new Uint8Array(totalLen);
                        let offset = 0;
-                       for (let i=0; i<totalChunks; i++) {
-                          resultData.set(next[i], offset);
-                          offset += next[i].length;
+                       for (let i = 0; i < totalChunks; i++) {
+                         if (next[i]) {
+                           resultData.set(next[i], offset);
+                           offset += next[i].length;
+                         }
                        }
                        setDecPayload(resultData);
                        setDecOutputText(new TextDecoder().decode(resultData));
                     }
+
+                    // 💖 1回でも該当チャンクの受信に成功したら次のチャンクを待機するようにシフトするよ！✨
+                    setAwaitingChunkIndex(currentAwaiting => {
+                       // 今受信した chunkIndex が現在の待機対象だった場合、もしくは既に受信済みの場合
+                       if (next[currentAwaiting]) {
+                          // 次の未受信の最小インデックスを探してそこを新しい待機対象にする！
+                          for (let i = currentAwaiting + 1; i < totalChunks; i++) {
+                             if (!next[i]) return i;
+                          }
+                          for (let i = 0; i < totalChunks; i++) {
+                             if (!next[i]) return i;
+                          }
+                          return totalChunks; // 全部揃ったら totalChunks (完了) にセット！
+                       }
+                       return currentAwaiting; // まだ期待のチャンクが来ていなければ待機を維持
+                    });
+
                     return next;
                   });
                 }
@@ -349,7 +389,7 @@ export default function App() {
                 {t.encMode}
               </button>
               <button
-                onClick={() => setMode("RECEIVE")}
+                onClick={() => { setMode("RECEIVE"); resetReceiver(); }}
                 className={`px-4 py-1.5 rounded text-xs font-bold transition-colors ${mode === "RECEIVE" ? "bg-pink-600 text-white shadow-lg shadow-pink-900/20" : "text-gray-400 hover:text-white"}`}
               >
                 {t.decMode}
@@ -451,9 +491,14 @@ export default function App() {
                     {t.chunks}: {encStats.totalChunks}
                   </span>
                   {isStreaming && (
-                    <span className="text-[9px] font-mono bg-[#15181e] px-1.5 py-0.5 text-green-400 border border-green-800 rounded">
-                      {t.fpsTarget}: {fps}
-                    </span>
+                    <>
+                      <span className="text-[9px] font-mono bg-yellow-950/40 text-yellow-400 border border-yellow-800/80 px-1.5 py-0.5 rounded animate-pulse">
+                        TX_CHUNK: {currentTxIndex} / {encStats.totalChunks - 1} (REMAIN: {encStats.totalChunks - currentTxIndex - 1})
+                      </span>
+                      <span className="text-[9px] font-mono bg-[#15181e] px-1.5 py-0.5 text-green-400 border border-green-800 rounded">
+                        {t.fpsTarget}: {fps}
+                      </span>
+                    </>
                   )}
                 </div>
                 <div className="flex items-center gap-2">
@@ -542,18 +587,60 @@ export default function App() {
                       CRC: {debugInfo?.crcOk ? t.crcOk : t.crcWaiting}
                     </span>
                   </div>
-                  <div className="text-[11px] font-mono leading-relaxed flex-1 overflow-y-auto space-y-1">
+                  <div className="text-[11px] font-mono leading-relaxed flex-1 overflow-y-auto space-y-2">
                     <div className="text-gray-500">// SCANNER TELEMETRY</div>
                     {debugInfo ? (
-                      <>
+                      <div className="space-y-1">
                         <div className="text-cyan-600">Corners Found: {debugInfo.corners ? 'TRUE' : 'FALSE'}</div>
                         {debugInfo.detectedProfileId && <div className="text-pink-400">Profile Locked: [{debugInfo.detectedProfileId}] (Size: {debugInfo.estimatedGridSize})</div>}
                         <div className="text-cyan-600">Payload CRC: {debugInfo.crcOk ? <span className="text-green-400">PASSED</span> : <span className="text-red-400">FAILED</span>}</div>
-                        <div className="text-gray-300">Total Chunks Recv: {Object.keys(chunksReceived).length}</div>
-                      </>
+                        <div className="text-gray-300">Total Chunks Recv: {Object.keys(chunksReceived).length} / {totalRxChunks}</div>
+                        {awaitingChunkIndex < totalRxChunks ? (
+                          <div className="text-yellow-400 animate-pulse font-bold">Awaiting Target: #{awaitingChunkIndex} (Remaining: {totalRxChunks - Object.keys(chunksReceived).length})</div>
+                        ) : (
+                          <div className="text-green-400 font-bold animate-bounce">✨ ALL CHUNKS FULLY RECOVERED! 🎉</div>
+                        )}
+                      </div>
                     ) : (
                       <div className="text-gray-600 animate-pulse">Awaiting matrix engagement...</div>
                     )}
+
+                    {/* 💖 受信状況ビジュアルグリッド 💖 */}
+                    <div className="mt-4 border-t border-[#2d333d]/60 pt-3">
+                      <div className="text-[10px] font-bold text-gray-500 uppercase mb-2 flex justify-between items-center">
+                        <span>CHUNK RECEIVE MATRIX</span>
+                        <span className="text-pink-400 font-mono text-[10px]">{Math.round((Object.keys(chunksReceived).length / Math.max(1, totalRxChunks)) * 100)}% COMPLETE</span>
+                      </div>
+                      
+                      {/* リアルタイムインジケーター */}
+                      <div className="flex flex-wrap gap-1 p-2 bg-black/60 rounded border border-[#2d333d] max-h-[140px] overflow-y-auto">
+                        {Array.from({ length: totalRxChunks }).map((_, idx) => {
+                          const isRecv = !!chunksReceived[idx];
+                          const isAwaiting = idx === awaitingChunkIndex;
+                          return (
+                            <div
+                              key={idx}
+                              title={`Chunk ${idx}${isRecv ? ': RECEIVED' : isAwaiting ? ': AWAITING' : ': PENDING'}`}
+                              className={`w-6 h-6 rounded flex items-center justify-center text-[8px] font-mono font-bold border transition-all duration-300
+                                ${isRecv 
+                                  ? 'bg-pink-600/30 text-pink-400 border-pink-500 shadow-[0_0_8px_rgba(236,72,153,0.3)] animate-pulse font-black' 
+                                  : isAwaiting 
+                                    ? 'bg-yellow-500/20 text-yellow-400 border-yellow-400 animate-pulse border-dashed' 
+                                    : 'bg-gray-800/40 text-gray-600 border-gray-700/60'
+                                }`}
+                            >
+                              {idx}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      
+                      <div className="mt-2 flex items-center justify-between text-[9px] font-mono text-gray-400 uppercase">
+                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-pink-600/30 border border-pink-500"></span> Received</span>
+                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-yellow-500/20 border border-yellow-400"></span> Awaiting</span>
+                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-gray-800/40 border border-gray-700/60"></span> Pending</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
 

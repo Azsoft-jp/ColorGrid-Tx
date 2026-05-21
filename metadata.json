@@ -1,6 +1,8 @@
 {
-  "name": "",
-  "description": "",
-  "requestFramePermissions": [],
+  "name": "ColorGrid-Tx",
+  "description": "High-performance optical 2D bar/grid-matrix data transfer protocol, transmitter, and receiver utility featuring sub-pixel alignment calibration.",
+  "requestFramePermissions": [
+    "camera"
+  ],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

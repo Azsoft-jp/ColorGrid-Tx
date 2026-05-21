@@ -121,41 +121,73 @@ async function runTest() {
   });
 
   encoder.setData(dummyData, { type: "file", filename: "tmp.dat", mimeType: "application/octet-stream" });
-  console.log(`📦 データ分割完了：${encoder.getStats().totalChunks} チャンクに分かれたよ。`);
 
-  // 1枚目（chunk 0）を描画してみてテスト
-  console.log("🎨 1枚目のチャンク（0番目）を描画するよ！");
-  encoder.renderChunk(0);
+  const totalChunks = encoder.getStats().totalChunks;
+  console.log(`📦 データ分割完了：${totalChunks} チャンクに分かれたよ。`);
 
-  // 3. デコーダのセットアップ
-  const ctx = canvas.getContext('2d') as any;
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  // 3. 全チャンクをループして、エンコード -> デコードしてデータを集める
   const decoder = new ColorGridDecoder();
+  const receivedChunks: Buffer[] = [];
+  let successCount = 0;
 
-  console.log("🔍 デコードを実行するよ！");
-  const res = decoder.decodeFrame(imageData);
+  console.log("🌀 全チャンク（121枚）のエンコード＆デコード検証ループを開始するよ！");
 
-  if (res.ok) {
-    console.log("✨ デコード大成功ーーーー！！！！！ヤバい！");
-    console.log(`チャンクインデックス: ${res.chunk?.chunkIndex} / ${res.chunk?.totalChunks}`);
-    console.log(`ペイロード長: ${res.chunk?.payload.length} bytes`);
+  for (let i = 0; i < totalChunks; i++) {
+    // チャンクを描画
+    encoder.renderChunk(i);
+
+    // キャンバスから画像データを取得
+    const ctx = canvas.getContext('2d') as any;
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    // デコード！
+    const res = decoder.decodeFrame(imageData);
+
+    if (res.ok && res.chunk) {
+      if (res.chunk.chunkIndex !== i) {
+        console.error(`❌ ガーン！チャンクインデックス不一致！期待: ${i}, 取得: ${res.chunk.chunkIndex}`);
+      }
+      receivedChunks.push(Buffer.from(res.chunk.payload));
+      successCount++;
+    } else {
+      console.error(`❌ あちゃー！チャンク ${i} のデコードに失敗したよ🥺`);
+      console.error(`理由: ${res.reason}`);
+      if (res.debug) {
+        console.error("Debug stats:", {
+          clockValue: res.debug.clockValue,
+          estimatedGridSize: res.debug.estimatedGridSize
+        });
+      }
+      break;
+    }
+  }
+
+  console.log(`\n📊 途中結果発表〜♪`);
+  console.log(`成功チャンク数: ${successCount} / ${totalChunks}`);
+
+  if (successCount === totalChunks) {
+    console.log("🥺✨ 全てのチャンクがノーエラーでデコードできたよ！マジ神！");
     
-    // サンプリングしたセルのうち、ヘッダセルの座標と、期待される中心座標をいくつか出してみる
-    if (res.debug && res.debug.corners) {
-       console.log("Detected Corners:", res.debug.corners);
+    // 全ペイロードをマージするよ
+    const mergedData = Buffer.concat(receivedChunks);
+    console.log(`📦 復元データサイズ: ${mergedData.length} bytes`);
+
+    // 元データとハッシュ値を比較するよ
+    const originalHash = crypto.createHash("sha256").update(dummyData).digest("hex");
+    const restoredHash = crypto.createHash("sha256").update(mergedData).digest("hex");
+
+    console.log(`🔑 元データのSHA-256:      ${originalHash}`);
+    console.log(`✨ 復元データのSHA-256:    ${restoredHash}`);
+
+    if (originalHash === restoredHash) {
+      console.log("\n💖💖💖 鬼ヤバい！！！チェックサム完全一致！！！ 💖💖💖");
+      console.log("完璧にデータが復元できたよー！これでもう自己診断もデータ送受信バッチリじゃん！✌️🎉✨");
+    } else {
+      console.error("\n❌ マジかー、ハッシュ値が一致しなかったよ、、、🥺💦");
+      console.error("データのマージ順か、中身がどっかで壊れてるかも！");
     }
   } else {
-    console.log("😭 デコード失敗しちゃった、、、マジ無理。");
-    console.log(`理由: ${res.reason}`);
-    if (res.debug) {
-      console.log("Debug Info:", {
-        finderPoints: res.debug.finderPoints,
-        corners: res.debug.corners,
-        clockValue: res.debug.clockValue,
-        estimatedGridSize: res.debug.estimatedGridSize,
-        detectedProfileId: res.debug.detectedProfileId
-      });
-    }
+    console.error("😭 全チャンクの確認ができなかったからチェックサム比較はお預けだよ、、、💦");
   }
 }
 

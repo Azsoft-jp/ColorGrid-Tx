@@ -31,6 +31,9 @@ export class ColorGridEncoder {
   private timerId: number | null = null;
   private clockState = 0; // 0 or 1
   private rs = new ReedSolomon();
+  
+  // 今どのチャンクを送ってるかをUIに伝えるためのコールバックだよ！✨
+  public onChunkChange?: (index: number, total: number) => void;
 
   constructor(canvas: HTMLCanvasElement, options?: Partial<EncoderOptions>) {
     this.canvas = canvas;
@@ -247,7 +250,11 @@ export class ColorGridEncoder {
     // FPS間隔で描画更新
     const tick = () => {
       this.clockState = 1 - this.clockState;
-      this.renderChunk(this.currentChunkIndex);
+      const idx = this.currentChunkIndex;
+      this.renderChunk(idx);
+      if (this.onChunkChange) {
+        this.onChunkChange(idx, this.chunks.length || 1);
+      }
       this.currentChunkIndex++;
       if (this.currentChunkIndex >= Math.max(1, this.chunks.length)) {
         this.currentChunkIndex = 0;

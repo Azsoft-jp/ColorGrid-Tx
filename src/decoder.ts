@@ -73,13 +73,89 @@ export class ColorGridDecoder {
       ];
 
       // 射影変換行列(ホモグラフィ)を求める！
-      const mat = getPerspectiveTransform(dstPoints, srcPoints);
+      let mat = getPerspectiveTransform(dstPoints, srcPoints);
       if (!mat) continue;
 
       const pt0 = perspectiveTransform({x:0, y:0}, mat);
       const pt1 = perspectiveTransform({x:1, y:0}, mat);
       const cellWidth = Math.hypot(pt1.x - pt0.x, pt1.y - pt0.y);
       const sampleRadius = cellWidth < 8 ? 0 : 1;
+
+      // ーーー ✨ アライメントパターン(AP)による高精度格子校正エンジン ✨ ーーー
+      // アライメントパターンの中心は常に (N - 6, N - 6) だよ！
+      // 5x5の理想パターンの白黒判定（dx,dy が -2〜2 の範囲）
+      const isIdealBlack = (dx: number, dy: number): boolean => {
+        return (dx === 0 && dy === 0) || Math.max(Math.abs(dx), Math.abs(dy)) === 2;
+      };
+
+      let bestShiftX = 0;
+      let bestShiftY = 0;
+      let maxContrast = -Infinity;
+
+      // -0.8 から +0.8 セル分の範囲を 0.05 セル刻みで局所スイープ！
+      // スイープ限界を0.8にすることで、5x5（半径2）のサンプル領域がアライメント枠の外（3に白セパレータがあり、4以降がデータ領域）
+      // に侵入して不定なペイロードデータの影響（ノイズ）を受けるのを完全に100%防いでクリーンに検出できるお✨
+      for (let sy = -0.8; sy <= 0.8; sy += 0.05) {
+        for (let sx = -0.8; sx <= 0.8; sx += 0.05) {
+          let sumWhiteLuma = 0;
+          let countWhite = 0;
+          let sumBlackLuma = 0;
+          let countBlack = 0;
+
+          for (let dy = -2; dy <= 2; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+              const pt = perspectiveTransform({ x: N - 6 + sx + dx, y: N - 6 + sy + dy }, mat);
+              const col = this.sampleColor(imageData, pt.x, pt.y, sampleRadius);
+              if (!col) continue;
+
+              const luma = col.r * 0.299 + col.g * 0.587 + col.b * 0.114;
+              if (isIdealBlack(dx, dy)) {
+                sumBlackLuma += luma;
+                countBlack++;
+              } else {
+                sumWhiteLuma += luma;
+                countWhite++;
+              }
+            }
+          }
+
+          if (countWhite > 0 && countBlack > 0) {
+            const avgWhite = sumWhiteLuma / countWhite;
+            const avgBlack = sumBlackLuma / countBlack;
+            const contrast = avgWhite - avgBlack; // 白は明るく、黒は暗いため差が最大になる位置がジャストフィット！
+            if (contrast > maxContrast) {
+              maxContrast = contrast;
+              bestShiftX = sx;
+              bestShiftY = sy;
+            }
+          }
+        }
+      }
+
+      // ある程度の明暗差（コントラスト差12以上）があればAP位置を確定！
+      // もし影などのせいで見つからなくても、フォールバックで平行四辺形からの推定をそのままキープするから絶対バグらないよ💖
+      if (maxContrast >= 12) {
+        const realAP = perspectiveTransform({ x: N - 6 + bestShiftX, y: N - 6 + bestShiftY }, mat);
+
+        const dstPointsAP = [
+          { x: centerOff, y: centerOff },
+          { x: N - centerOff, y: centerOff },
+          { x: N - 6, y: N - 6 }, // 3つ目の点を右下のAP中心（N-6, N-6）にするよ！
+          { x: centerOff, y: N - centerOff },
+        ];
+
+        const srcPointsAP = [
+          TL,
+          TR,
+          realAP, // 4点目にアライメントパターンの真の座標をセット
+          BL,
+        ];
+
+        const matAP = getPerspectiveTransform(dstPointsAP, srcPointsAP);
+        if (matAP) {
+          mat = matAP; // 完璧な射影変換行列で上書き！！ヤバい！
+        }
+      }
 
       // 基準パレット(8色)の読み取り
       const readPalette: { r: number; g: number; b: number }[] = [];
