@@ -28,9 +28,9 @@ export class ReedSolomon {
     let g = new Uint8Array([1]);
     for (let i = 0; i < parityBytes; i++) {
       const nextG = new Uint8Array(g.length + 1);
-      nextG[0] = this.gfMul(g[0], this.expTable[i]);
+      nextG[0] = this.gfMul(g[0], this.expTable[i % 255]);
       for (let j = 1; j < g.length; j++) {
-        nextG[j] = g[j - 1] ^ this.gfMul(g[j], this.expTable[i]);
+        nextG[j] = g[j - 1] ^ this.gfMul(g[j], this.expTable[i % 255]);
       }
       nextG[g.length] = g[g.length - 1];
       g = nextG;

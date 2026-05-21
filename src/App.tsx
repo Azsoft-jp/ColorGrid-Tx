@@ -276,9 +276,20 @@ export default function App() {
             <h3 className={`text-lg font-bold mb-4 ${testResult.ok ? 'text-green-400' : 'text-red-400'}`}>
               {testResult.title}
             </h3>
-            <pre className="text-xs text-gray-300 font-mono whitespace-pre-wrap bg-[#15181e] p-3 rounded border border-[#2d333d] overflow-x-auto">
-              {testResult.details}
-            </pre>
+            <div className="relative group flex-1 min-h-0 overflow-y-auto">
+              <pre className="text-xs text-gray-300 font-mono whitespace-pre-wrap bg-[#15181e] p-3 rounded border border-[#2d333d] h-full overflow-x-auto max-h-[60vh]">
+                {testResult.details}
+              </pre>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(testResult.details);
+                  setTestResult(prev => prev ? { ...prev, title: "マジコピった！📋✨" } : null);
+                }}
+                className="absolute top-2 right-4 px-2 py-1 bg-[#2d333d] hover:bg-pink-600 rounded text-[10px] font-bold text-gray-300 hover:text-white transition-colors shadow-md border border-[#4b5563]"
+              >
+                📋 コピー
+              </button>
+            </div>
             <div className="mt-6 flex justify-end">
               <button
                 onClick={() => setTestResult(null)}
@@ -420,8 +431,23 @@ export default function App() {
 
             {/* Right: Encoder Canvas output */}
             <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-[400px] lg:h-full">
-              <div className="flex items-center justify-between mb-3 shrink-0">
-                <span className="text-[10px] font-bold text-gray-500 uppercase pt-1">{t.matrixOutput}</span>
+              <div className="flex items-center justify-between mb-3 shrink-0 gap-2 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-bold text-gray-500 uppercase pt-1">{t.matrixOutput}</span>
+                  {isStreaming && (
+                    <span className="text-[9px] font-mono bg-red-900/60 text-red-400 border border-red-800 px-1.5 py-0.5 uppercase animate-pulse rounded">
+                      TX_ACTIVE
+                    </span>
+                  )}
+                  <span className="text-[9px] font-mono bg-[#15181e] px-1.5 py-0.5 text-cyan-300 border border-cyan-800 rounded">
+                    {t.chunks}: {encStats.totalChunks}
+                  </span>
+                  {isStreaming && (
+                    <span className="text-[9px] font-mono bg-[#15181e] px-1.5 py-0.5 text-green-400 border border-green-800 rounded">
+                      {t.fpsTarget}: {fps}
+                    </span>
+                  )}
+                </div>
                 <button
                   onClick={handleSaveImage}
                   className="px-3 py-1 bg-[#2d333d] hover:bg-[#374151] rounded text-[10px] font-bold text-gray-300 transition-colors border border-[#4b5563]"
@@ -431,17 +457,7 @@ export default function App() {
               </div>
               
               <div className="flex-1 bg-black rounded border border-[#2d333d] flex items-center justify-center p-2 relative group overflow-hidden">
-                <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_transparent_0%,_#000_100%)] opacity-40 pointer-events-none z-10"></div>
                 <canvas ref={encCanvasRef} className="max-w-full max-h-full object-contain relative z-0" style={{ imageRendering: 'pixelated' }}></canvas>
-                
-                <div className="absolute top-4 left-4 z-20">
-                   {isStreaming && <div className="text-[10px] font-mono bg-red-900/60 text-red-400 border border-red-800 px-2 py-0.5 uppercase animate-pulse">TX_ACTIVE</div>}
-                </div>
-                
-                <div className="absolute bottom-4 right-4 flex flex-col gap-1 items-end z-20">
-                   <div className="text-[10px] font-mono bg-black/60 px-2 py-1 text-cyan-300 border border-cyan-800">{t.chunks}: {encStats.totalChunks}</div>
-                   {isStreaming && <div className="text-[10px] font-mono bg-black/60 px-2 py-1 text-green-400 border border-green-800">{t.fpsTarget}: {fps}</div>}
-                </div>
               </div>
             </section>
           </div>

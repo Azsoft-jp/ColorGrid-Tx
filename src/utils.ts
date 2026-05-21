@@ -51,12 +51,12 @@ export function isReservedCell(x: number, y: number, profile: GridProfile): bool
   const G = profile.size;
   const F = profile.finderSize;
 
-  // 左上ファインダー
-  if (x < F && y < F) return true;
-  // 右上ファインダー
-  if (x >= G - F && y < F) return true;
-  // 左下ファインダー
-  if (x < F && y >= G - F) return true;
+  // 左上ファインダー + 1セルのセパレータ (Fまで)
+  if (x <= F && y <= F) return true;
+  // 右上ファインダー + セパレータ (G-F-1から)
+  if (x >= G - F - 1 && y <= F) return true;
+  // 左下ファインダー + セパレータ
+  if (x <= F && y >= G - F - 1) return true;
 
   // セパレータ（ファインダー周囲1セルは常に白）
   // 左上ファインダー周囲

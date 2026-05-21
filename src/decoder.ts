@@ -17,7 +17,8 @@ export class ColorGridDecoder {
 
     // 3点見つからなかったらその時点でダメぽ🥺
     if (finderCenters.length < 3) {
-      return { ok: false, reason: `ファインダーが3点見つからないみ💦 (${finderCenters.length}個)`, debug };
+      const logs = (this as any).debugLogs ? (this as any).debugLogs.join(' | ') : 'none';
+      return { ok: false, reason: `ファインダーが3点見つからないみ💦 (${finderCenters.length}個) Centers:${(this as any).debugCentersCount} Clusters:${(this as any).debugClustersCount}\nLogs: ${logs}`, debug };
     }
 
     // 2. クラスタリングして 左上(TL), 右上(TR), 左下(BL) を特定
@@ -56,7 +57,7 @@ export class ColorGridDecoder {
       ];
 
       // 射影変換行列(ホモグラフィ)を求める！
-      const mat = getPerspectiveTransform(srcPoints, dstPoints);
+      const mat = getPerspectiveTransform(dstPoints, srcPoints);
       if (!mat) continue;
 
       // 基準パレット(8色)の読み取り
@@ -192,13 +193,17 @@ export class ColorGridDecoder {
     // カメラの明るさに応じて適応的にしきい値を設定！
     const threshold = Math.max(50, Math.min(avgLuma * 0.9, 180));
 
-    // Y輝度で白黒判定するヘルパー
+    // R,G,Bの最大値で白黒判定するみ！
+    // カラーセル（赤や青）は最大値が高いのでこれで除外できる✨
     const isBlack = (i: number) => {
       const r = data[i], g = data[i+1], b = data[i+2];
-      return (r * 0.299 + g * 0.587 + b * 0.114) < threshold;
+      const maxCol = Math.max(r, g, b);
+      // Lumaの閾値を使うけど、最大値ベースで比較して色を無視する！
+      return maxCol < threshold * 1.2;
     };
 
     const centers: Point[] = [];
+    (this as any).debugLogs = [`Start w:${width} h:${height} Luma:${avgLuma.toFixed(1)} Th:${threshold.toFixed(1)}`];
 
     // 水平方向の走査（確実に見つけるために全行走査する！）
     const step = 1;
@@ -211,7 +216,7 @@ export class ColorGridDecoder {
         const black = isBlack(i);
 
         // 最初の黒を見つけるまでは無視！
-        if (currentState === 0 && !black) {
+        if (currentState === 0 && stateCounts[0] === 0 && !black) {
           continue;
         }
 
@@ -220,18 +225,25 @@ export class ColorGridDecoder {
         } else {
           if (currentState === 4) {
             // フルで埋まったら比率チェック！
+            if ((this as any).debugLogs.length < 50) {
+              (this as any).debugLogs.push(`y=${y},x=${x}: [${stateCounts.join(',')}]`);
+            }
             if (this.checkRatio(stateCounts)) {
               // X中心を概算
               const center = x - Math.floor(stateCounts[4] + stateCounts[3] + stateCounts[2] / 2);
-              centers.push({ x: center, y });
+              if (this.crossCheckVertical(imageData, center, y, stateCounts[2], isBlack)) {
+                centers.push({ x: center, y });
+              }
               currentState = 0;
               stateCounts = [0, 0, 0, 0, 0];
             } else {
-              // 比率が合わなかった場合は、シフトではなく完全にリセットする！
-              // ファインダーパターンの前には必ずセパレータ(白)があるので、
-              // ゴミデータからシフトして引き継ぐと状態が狂ってしまうため。
-              currentState = 0;
-              stateCounts = [0, 0, 0, 0, 0];
+              // シフトして状態を継続する！
+              stateCounts[0] = stateCounts[2];
+              stateCounts[1] = stateCounts[3];
+              stateCounts[2] = stateCounts[4];
+              stateCounts[3] = 1;
+              stateCounts[4] = 0;
+              currentState = 3;
             }
           } else {
             currentState++;
@@ -246,9 +258,9 @@ export class ColorGridDecoder {
     for (const pt of centers) {
       let found = false;
       for (const cluster of clusters) {
-        // クラスタの最初の点との距離を見る（中心が引きずられるのを防止！）
-        const dist = Math.hypot(pt.x - cluster[0].x, pt.y - cluster[0].y);
-        // 同じファインダーパターンの構成点とみなす距離
+        // クラスタの直前の点との距離を見る
+        const lastPt = cluster[cluster.length - 1];
+        const dist = Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y);
         // ファインダーのサイズはある程度幅広いので、少し余裕をもたせる
         if (dist < 40) {
           cluster.push(pt);
@@ -264,6 +276,9 @@ export class ColorGridDecoder {
     // ゴミデータによる偶然の一致は数行しか続かないので弾ける！
     clusters.sort((a, b) => b.length - a.length);
 
+    (this as any).debugCentersCount = centers.length;
+    (this as any).debugClustersCount = clusters.length;
+
     const merged = clusters.slice(0, 3).map(cluster => {
       const sumX = cluster.reduce((a, b) => a + b.x, 0);
       const sumY = cluster.reduce((a, b) => a + b.y, 0);
@@ -272,6 +287,76 @@ export class ColorGridDecoder {
 
     // 上位3つを返す
     return merged;
+  }
+
+  private crossCheckVertical(
+    imageData: ImageData,
+    centerX: number,
+    centerY: number,
+    maxCount: number,
+    isBlack: (i: number) => boolean
+  ): boolean {
+    const width = imageData.width;
+    const height = imageData.height;
+    
+    // 垂直方向のカウント
+    const vCounts = [0, 0, 0, 0, 0];
+    
+    // 1. centerY から上にスキャン
+    let y = centerY;
+    // まず中央の黒 (vCounts[2] の半分)
+    while (y >= 0 && isBlack((y * width + centerX) * 4)) {
+      vCounts[2]++;
+      y--;
+    }
+    if (y < 0) return false;
+    
+    // 次に内側の白 (vCounts[1])
+    while (y >= 0 && !isBlack((y * width + centerX) * 4)) {
+      vCounts[1]++;
+      y--;
+    }
+    if (y < 0 || vCounts[1] === 0) return false;
+    
+    // 次に外枠の黒 (vCounts[0])
+    while (y >= 0 && isBlack((y * width + centerX) * 4)) {
+      vCounts[0]++;
+      y--;
+    }
+    if (vCounts[0] === 0) return false;
+    
+    // 2. centerY + 1 から下にスキャン
+    y = centerY + 1;
+    // 中央の黒 (vCounts[2] のもう半分)
+    while (y < height && isBlack((y * width + centerX) * 4)) {
+      vCounts[2]++;
+      y++;
+    }
+    if (y >= height) return false;
+    
+    // 内側の白 (vCounts[3])
+    while (y < height && !isBlack((y * width + centerX) * 4)) {
+      vCounts[3]++;
+      y++;
+    }
+    if (y >= height || vCounts[3] === 0) return false;
+    
+    // 外枠の黒 (vCounts[4])
+    while (y < height && isBlack((y * width + centerX) * 4)) {
+      vCounts[4]++;
+      y++;
+    }
+    if (vCounts[4] === 0) return false;
+    
+    // 比率のチェック！
+    const total = vCounts.reduce((a, b) => a + b, 0);
+    // 水平のサイズと、垂直のサイズが著しく異なっている場合はファインダーではない（アスペクト比チェック）
+    const hTotal = maxCount * 7 / 3; // 水平の推定トータル
+    if (Math.abs(total - hTotal) > hTotal * 0.8) {
+      return false;
+    }
+    
+    return this.checkRatio(vCounts);
   }
 
   // 1:1:3:1:1 の比率許容チェック (許容誤差100%くらいに緩める！)
