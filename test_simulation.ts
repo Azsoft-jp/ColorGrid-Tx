@@ -155,7 +155,9 @@ async function runTest() {
       if (res.debug) {
         console.error("Debug stats:", {
           clockValue: res.debug.clockValue,
-          estimatedGridSize: res.debug.estimatedGridSize
+          estimatedGridSize: res.debug.estimatedGridSize,
+          finderPoints: res.debug.finderPoints,
+          phaseLogs: res.debug.phaseLogs
         });
       }
       break;

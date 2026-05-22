@@ -44,6 +44,11 @@ export interface DecodedChunk {
 export interface PhaseLog {
   phase:
     | "finder"        // ファインダー検出
+    | "finder_coords" // ファインダー座標ログ
+    | "ratio_check"   // 許容比率スキャン結果
+    | "diagonal_check" // 対角長チェック
+    | "cluster_filter" // クラスタ品質フィルタ
+    | "triangle_area" // ファインダー面積チェック
     | "homography"    // ホモグラフィ生成
     | "alignment"     // APスイープ
     | "palette"       // 基準パレット読み取り
@@ -51,7 +56,10 @@ export interface PhaseLog {
     | "headerRS"      // ヘッダRSデコード
     | "magic"         // Magicバイト照合
     | "payloadCRC"    // ペイロードCRC照合
-    | "success";      // デコード成功
+    | "success"       // デコード成功
+    | "timing"        // タイミングデータからのプロファイル絞り込み
+    | "timingCorrection" // タイミングパターン補正
+    | "payloadVote";    // 複数フレーム多数決
   ok: boolean;
   detail: string;    // 失敗理由や中間値の数値
   durationMs: number;

@@ -144,7 +144,40 @@ export default function App() {
   const [debugInfo, setDebugInfo] = useState<DecodeDebugInfo | null>(null);
   const [chunksReceived, setChunksReceived] = useState<Record<number, Uint8Array>>({});
   const [totalRxChunks, setTotalRxChunks] = useState(1); // デコード時にヘッダから自動取得するよお！
+  const [lastErrorReason, setLastErrorReason] = useState("");
   const decoderRef = useRef(new ColorGridDecoder());
+
+  // 🛠 デバッグUI用の神パラメータたち！✨
+  const [isFreezeLog, setIsFreezeLog] = useState(false);
+  const isFreezeLogRef = useRef(false);
+  React.useEffect(() => {
+    isFreezeLogRef.current = isFreezeLog;
+  }, [isFreezeLog]);
+
+  const [accumulatedLogs, setAccumulatedLogs] = useState<any[]>([]);
+  const [isCopied, setIsCopied] = useState(false);
+  const [decodeSuccessCount, setDecodeSuccessCount] = useState(0);
+  const [decodeFailureCount, setDecodeFailureCount] = useState(0);
+  const [isErrorStopped, setIsErrorStopped] = useState(false);
+
+  const toggleFreezeLog = () => {
+    if (isFreezeLog) {
+      setIsFreezeLog(false);
+      setIsErrorStopped(false);
+    } else {
+      setIsFreezeLog(true);
+    }
+  };
+
+  const handleCopyLogs = () => {
+    const jsonStr = JSON.stringify(accumulatedLogs, null, 2);
+    navigator.clipboard.writeText(jsonStr).then(() => {
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+    }).catch(err => {
+      console.error("Failed to copy debug logs:", err);
+    });
+  };
 
   // 双方向制御用Refs! 🛠
   const ackVideoRef = useRef<HTMLVideoElement>(null);
@@ -174,6 +207,7 @@ export default function App() {
     setDecOutputText("");
     setDecPayload(null);
     setTotalRxChunks(1);
+    setLastErrorReason("");
   };
 
   const startCamera = async () => {
@@ -273,6 +307,26 @@ export default function App() {
 
                 setDebugInfo(res.debug || null);
 
+                // 📊 成功・失敗数カウントアップ＆自動凍結制御 📊
+                if (res.ok) {
+                  setDecodeSuccessCount(prev => prev + 1);
+                } else {
+                  setDecodeFailureCount(prev => prev + 1);
+                  // エラーが発生した瞬間に自動でストップして現場保存！🚨
+                  setIsFreezeLog(true);
+                  setIsErrorStopped(true);
+                }
+
+                // 📊 ログ表示エリアの更新（凍結中でないか、Profile Lockedしたときだけ蓄積！） 📊
+                if (res.debug?.phaseLogs && res.debug.phaseLogs.length > 0) {
+                  if (!isFreezeLogRef.current || res.debug.detectedProfileId) {
+                    setAccumulatedLogs(prev => {
+                      const merged = [...prev, ...(res.debug!.phaseLogs!)];
+                      return merged.slice(-50); // 直近50件制限
+                    });
+                  }
+                }
+
                 // デバッグ情報のオーバーレイ描画
                 if (res.debug) {
                   if (res.debug.corners) {
@@ -296,6 +350,7 @@ export default function App() {
                 }
 
                 if (res.ok && res.chunk) {
+                  setLastErrorReason(""); // 成功時にエラー理由をクリア！✨
                   const { chunkIndex, totalChunks, payload } = res.chunk;
                   setTotalRxChunks(totalChunks);
 
@@ -328,6 +383,10 @@ export default function App() {
 
                     return next;
                   });
+                } else {
+                  if (res.reason) {
+                    setLastErrorReason(res.reason);
+                  }
                 }
             }
           }
@@ -564,7 +623,7 @@ export default function App() {
   const isMaximizedSend = mode === "SEND" && isMaximized;
 
   return (
-    <div className={`fixed inset-0 bg-[#0f1115] text-[#d1d5db] font-sans flex flex-col select-none lg:overflow-hidden overflow-y-auto ${isMaximizedSend ? "p-0" : "p-4"}`}>
+    <div className={`fixed inset-0 bg-[#0f1115] text-[#d1d5db] font-sans flex flex-col select-none overflow-y-auto ${isMaximizedSend ? "p-0" : "p-4"}`}>
       {testResult && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-[#1c2128] border border-[#374151] rounded-xl p-6 shadow-2xl max-w-md w-full flex flex-col">
@@ -610,7 +669,7 @@ export default function App() {
             <div>
               <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2 flex-wrap">
                 ColorGrid-Tx 
-                <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 bg-cyan-900/40 text-cyan-400 rounded border border-cyan-800">v1.1.0-alpha</span>
+                <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 bg-cyan-900/40 text-cyan-400 rounded border border-cyan-800">v1.4.9</span>
               </h1>
               <p className="text-[11px] text-gray-500 font-mono">{t.subtitle}</p>
             </div>
@@ -651,12 +710,12 @@ export default function App() {
       )}
 
       {/* Main Operation Area */}
-      <main className="flex-1 min-h-0 overflow-y-auto lg:overflow-hidden pb-2 lg:pb-0">
+      <main className="flex-1 min-h-0 overflow-y-auto pb-2">
         {mode === "SEND" && (
-          <div className={`grid ${isMaximized ? "grid-cols-1 h-full" : "lg:grid-cols-2"} gap-4 h-auto lg:h-full lg:min-h-0`}>
+          <div className={`grid ${isMaximized ? "grid-cols-1 h-full" : "lg:grid-cols-2"} gap-4 h-auto lg:h-full lg:min-h-[500px]`}>
             {/* Left: Encoder Controls */}
             {!isMaximized && (
-              <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 overflow-y-auto relative h-[500px] lg:h-full shrink-0 lg:shrink">
+              <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 overflow-y-auto relative min-h-[500px] lg:h-full shrink-0 lg:shrink">
                 <div className="flex items-center justify-between mb-4 shrink-0">
                   <span className="text-[10px] font-bold text-cyan-400 tracking-widest uppercase">{t.encoderTitle}</span>
                   <span className="text-[10px] font-mono text-gray-500 uppercase">Status: {isStreaming ? t.statusTransmitting : t.statusStandby}</span>
@@ -858,7 +917,7 @@ export default function App() {
             )}
 
             {/* Right: Encoder Canvas output */}
-            <section className={`bg-[#15181e] flex flex-col p-4 relative ${isMaximized ? "border-0 rounded-none h-full w-full" : "rounded-xl border border-[#2d333d] h-[400px] lg:h-full"}`}>
+            <section className={`bg-[#15181e] flex flex-col p-4 relative ${isMaximized ? "border-0 rounded-none h-full w-full" : "rounded-xl border border-[#2d333d] min-h-[400px] lg:h-full"}`}>
                 <div className="flex items-center justify-between mb-3 shrink-0 gap-2 flex-wrap">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[10px] font-bold text-gray-500 uppercase pt-1">{t.matrixOutput}</span>
@@ -909,7 +968,7 @@ export default function App() {
           {mode === "RECEIVE" && (
             <div className="grid lg:grid-cols-2 gap-4 h-auto lg:h-full lg:min-h-0">
               {/* Left: Decoder Camera Feed */}
-              <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-[450px] lg:h-full overflow-hidden shrink-0 lg:shrink">
+              <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative min-h-[500px] lg:h-full overflow-hidden shrink-0 lg:shrink">
                 <div className="flex items-center justify-between mb-3 shrink-0">
                   <span className="text-[10px] font-bold text-pink-400 tracking-widest">{t.decoderTitle}</span>
                   <span className="text-[10px] font-mono text-gray-500 uppercase">Camera: {isCameraOn ? t.cameraActive : t.cameraInactive}</span>
@@ -1003,36 +1062,100 @@ export default function App() {
               </section>
 
             {/* Right: Decoder Outputs & Logs */}
-            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative h-[350px] lg:h-full">
+            <section className="bg-[#15181e] rounded-xl border border-[#2d333d] flex flex-col p-4 relative min-h-[450px] lg:h-full">
               <div className="flex items-center justify-between mb-3 shrink-0">
                 <span className="text-[10px] font-bold text-gray-500 uppercase pt-1">{t.telemetryPayload}</span>
               </div>
 
               <div className="flex-1 flex flex-col gap-4 min-h-0">
-                <div className="flex-1 bg-black/40 border border-[#2d333d] p-3 rounded flex flex-col overflow-hidden">
-                  <div className="flex justify-between items-center mb-2 shrink-0">
-                    <span className="text-[10px] font-bold text-gray-500 uppercase">{t.liveDecodeLogs}</span>
-                    <span className={`text-[10px] font-mono uppercase ${debugInfo?.crcOk ? 'text-green-500' : 'text-gray-600'}`}>
-                      CRC: {debugInfo?.crcOk ? t.crcOk : t.crcWaiting}
-                    </span>
-                  </div>
-                  <div className="text-[11px] font-mono leading-relaxed flex-1 overflow-y-auto space-y-2">
-                    <div className="text-gray-500">// SCANNER TELEMETRY</div>
-                    {debugInfo ? (
-                      <div className="space-y-1">
-                        <div className="text-cyan-600">Corners Found: {debugInfo.corners ? 'TRUE' : 'FALSE'}</div>
-                        {debugInfo.detectedProfileId && <div className="text-pink-400">Profile Locked: [{debugInfo.detectedProfileId}] (Size: {debugInfo.estimatedGridSize})</div>}
-                        <div className="text-cyan-600">Payload CRC: {debugInfo.crcOk ? <span className="text-green-400">PASSED</span> : <span className="text-red-400">FAILED</span>}</div>
-                        <div className="text-gray-300">Total Chunks Recv: {Object.keys(chunksReceived).length} / {totalRxChunks}</div>
-                        {isAllChunksRecovered ? (
-                          <div className="text-green-400 font-bold animate-bounce">✨ ALL CHUNKS FULLY RECOVERED! 🎉</div>
-                        ) : (
-                          <div className="text-yellow-400 animate-pulse font-bold">Awaiting Target: #{awaitingChunkIndex} (Remaining: {totalRxChunks - Object.keys(chunksReceived).length})</div>
-                        )}
+                <div className="flex-1 bg-black/40 border border-[#2d333d] p-3 rounded flex flex-col overflow-hidden max-h-[350px]">
+                  <div className="flex flex-col gap-2 mb-2 shrink-0">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">{t.liveDecodeLogs}</span>
+                      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${debugInfo?.crcOk ? 'bg-green-950 text-green-400 border border-green-800' : 'bg-gray-900 text-gray-500 border border-gray-850'}`}>
+                        CRC: {debugInfo?.crcOk ? t.crcOk : t.crcWaiting}
+                      </span>
+                    </div>
+
+                    {/* 📊 フレームカウンター 📊 */}
+                    <div className="flex items-center justify-between p-1.5 rounded bg-black/60 border border-[#2d333d]">
+                      <span className="text-[9px] font-mono text-gray-400 leading-none">
+                        成功: <span className="text-green-400 font-bold">{decodeSuccessCount}</span> / 
+                        失敗: <span className="text-red-400 font-bold">{decodeFailureCount}</span> / 
+                        成功率: <span className="text-cyan-400 font-bold">{decodeSuccessCount + decodeFailureCount > 0 ? Math.round((decodeSuccessCount / (decodeSuccessCount + decodeFailureCount)) * 100) : 0}%</span>
+                      </span>
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={toggleFreezeLog}
+                          className="px-2 py-0.5 rounded text-[8px] font-bold uppercase transition-colors border bg-[#1c2128] border-[#374151] hover:bg-[#2d333d] text-cyan-300 cursor-pointer"
+                        >
+                          {isFreezeLog ? "▶ 再開" : "⏸ 一時停止"}
+                        </button>
+                        <button
+                          onClick={handleCopyLogs}
+                          className="px-2 py-0.5 rounded text-[8px] font-bold uppercase transition-colors border bg-[#1c2128] border-[#374151] hover:bg-[#2d333d] text-pink-400 cursor-pointer"
+                        >
+                          {isCopied ? "✅ コピー完了" : "📋 ログをコピー"}
+                        </button>
                       </div>
-                    ) : (
-                      <div className="text-gray-600 animate-pulse">Awaiting matrix engagement...</div>
-                    )}
+                    </div>
+                  </div>
+
+                  {/* 🚨 エラー発生時：現場保存バナー 🚨 */}
+                  {isErrorStopped && (
+                    <div className="p-2 mb-2 rounded bg-red-950/40 border border-red-700/60 text-red-200 text-[10px] font-bold leading-none flex items-center justify-between shrink-0 animate-pulse">
+                      <span>🔴 エラーで一時停止中お！(現場保存)</span>
+                      <button 
+                        onClick={() => { setIsFreezeLog(false); setIsErrorStopped(false); }} 
+                        className="px-1.5 py-0.5 bg-red-700 hover:bg-red-600 text-white rounded text-[8px]"
+                      >
+                        ▶ ログ再開
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="text-[11px] font-mono leading-relaxed flex-1 overflow-y-auto space-y-2 pr-1 select-text">
+                    {/* telemetry summary */}
+                    <div className="space-y-1 p-2 bg-black/30 border border-[#2d333d]/50 rounded mb-2">
+                      <div className="text-cyan-500 text-[10px]">Corners Found: {debugInfo?.corners ? 'TRUE' : 'FALSE'}</div>
+                      {debugInfo?.detectedProfileId && <div className="text-pink-400 text-[10px]">Profile Locked: [{debugInfo.detectedProfileId}] (Size: {debugInfo.estimatedGridSize})</div>}
+                      <div className="text-cyan-500 text-[10px]">Payload CRC: {debugInfo?.crcOk ? <span className="text-green-400">PASSED</span> : <span className="text-red-400">FAILED</span>}</div>
+                      <div className="text-gray-300 text-[10px]">Total Chunks Recv: {Object.keys(chunksReceived).length} / {totalRxChunks}</div>
+                      {isAllChunksRecovered ? (
+                        <div className="text-green-400 font-bold text-[10px] animate-bounce">✨ ALL CHUNKS FULLY RECOVERED! 🎉</div>
+                      ) : (
+                        <div className="text-yellow-400 animate-pulse font-bold text-[10px]">Awaiting Target: #{awaitingChunkIndex} (Remaining: {totalRxChunks - Object.keys(chunksReceived).length})</div>
+                      )}
+                    </div>
+
+                    <div className="text-gray-500 border-t border-[#2d333d]/40 pt-1 text-[9px] uppercase font-bold tracking-wider">// RECENT DIAGNOSTIC PHASE LOGS (MAX 50)</div>
+                    
+                    <div className="space-y-1.5">
+                      {accumulatedLogs.length > 0 ? (
+                        [...accumulatedLogs].reverse().map((pl, lIdx) => (
+                          <div key={lIdx} className="p-1 px-1.5 rounded bg-[#13151b] border border-[#2d333d]/40 flex flex-col gap-0.5">
+                            <div className="flex items-center justify-between">
+                              <span className={`text-[8px] font-extrabold px-1 rounded uppercase min-w-[50px] text-center
+                                ${pl.ok 
+                                  ? 'bg-green-950/60 border border-green-800/80 text-green-400' 
+                                  : 'bg-red-950/60 border border-red-800/80 text-red-400'
+                                }`}
+                              >
+                                {pl.phase}
+                              </span>
+                              <span className="text-gray-600 text-[8px]">{pl.durationMs.toFixed(1)}ms</span>
+                            </div>
+                            <pre className="text-[10px] text-gray-300 whitespace-pre-wrap leading-normal font-sans pt-0.5">
+                              {pl.detail}
+                            </pre>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-gray-600 animate-pulse text-[10px]">Awaiting decode feedback to populate diagnostic logs...</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
 
                     {/* 💖 受信状況ビジュアルグリッド 💖 */}
                     <div className="mt-4 border-t border-[#2d333d]/60 pt-3">
@@ -1070,8 +1193,6 @@ export default function App() {
                         <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-gray-800/40 border border-gray-700/60"></span> Pending</span>
                       </div>
                     </div>
-                  </div>
-                </div>
 
                 <div className="flex flex-col gap-1 shrink-0">
                   <div className="flex items-center justify-between">

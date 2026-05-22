@@ -141,7 +141,12 @@ export const translations = {
     saveImage: "保存图片",
     downloadPayload: "下载数据",
     theaterMode: "影院模式",
-    normalMode: "普通模式"
+    normalMode: "普通模式",
+    interactiveSync: "双向交互同步",
+    interactiveSyncDesc: "通过将摄像头对准彼此的屏幕，建立一个响应式的闭环管道。根据需求传输并在收到 ACK 时自动切换！",
+    capData: "实质数据容量",
+    capParity: "纠错校验大小",
+    capTotal: "单帧总容量"
   },
   ko: {
     subtitle: "광학 비트 전송 프로토콜 / 순수 TS",
@@ -185,7 +190,12 @@ export const translations = {
     saveImage: "이미지 저장",
     downloadPayload: "페이로드 다운로드",
     theaterMode: "극장 모드",
-    normalMode: "일반 모드"
+    normalMode: "일반 모드",
+    interactiveSync: "양방향 인터랙티브 동기화",
+    interactiveSyncDesc: "서로의 화면에 카메라를 비추어 반응형 폐루프 파이프라인을 구축합니다. 요청 시 전송 및 ACK 수신 시 자동 전환!",
+    capData: "실질 데이터 용량",
+    capParity: "오류 정정 패리티",
+    capTotal: "1장당 총 용량"
   },
   ru: {
     subtitle: "ОПТИЧЕСКИЙ ПРОТОКОЛ ПЕРЕДАЧИ БИТ / ЧИСТЫЙ TS",
@@ -229,6 +239,11 @@ export const translations = {
     saveImage: "СОХРАНИТЬ ИЗОБР.",
     downloadPayload: "СКАЧАТЬ ДАННЫЕ",
     theaterMode: "РЕЖИМ ТЕАТРА",
-    normalMode: "ОБЫЧНЫЙ РЕЖИМ"
+    normalMode: "ОБЫЧНЫЙ РЕЖИМ",
+    interactiveSync: "Двусторонняя интерактивная синхронизация",
+    interactiveSyncDesc: "Установите реактивный замкнутый канал, направив камеры на экраны друг друга. Передача по запросу и автосдвиг по ACK!",
+    capData: "Полезный объем данных",
+    capParity: "Объем паритета RS",
+    capTotal: "Общая емкость кадра"
   }
 };

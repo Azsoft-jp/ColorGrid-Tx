@@ -75,6 +75,26 @@ export function perspectiveTransform(pt: Point, mat: Mat3): Point {
   };
 }
 
+export function rgbToHsv(r: number, g: number, b: number): { h: number, s: number, v: number } {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h = 0, s = 0;
+  const v = max;
+  const d = max - min;
+  s = max === 0 ? 0 : d / max;
+  
+  if (max !== min) {
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
+    h /= 6;
+  }
+  return { h: h * 360, s, v };
+}
+
 /**
  * RGBの距離計算！HSVまたは正規化で比較するよ！
  * なんで固定色のRGBをそのまま比較しないの？🤔：
@@ -82,8 +102,23 @@ export function perspectiveTransform(pt: Point, mat: Mat3): Point {
  * だから「一番近い色」を判定するためには、まずは明るさとかの影響を減らす必要があるの✨
  */
 export function colorDistance(r1: number, g1: number, b1: number, r2: number, g2: number, b2: number): number {
-  // 今回はわかりやすくユークリッド距離だけど、
-  // もし精度上げたいなら正規化したりすると良いみ🌈 (MVPとしてユークリッドで行くね)
-  return Math.sqrt(Math.pow(r1 - r2, 2) + Math.pow(g1 - g2, 2) + Math.pow(b1 - b2, 2));
+  // RGBのユークリッド距離（絶対的な明るさ・色の差）
+  const rgbDist = Math.sqrt(Math.pow(r1 - r2, 2) + Math.pow(g1 - g2, 2) + Math.pow(b1 - b2, 2));
+
+  // HSV空間に変換して、人間の直感に近い「色相(Hue)」を中心とした距離も算出！🔥
+  const hsv1 = rgbToHsv(r1, g1, b1);
+  const hsv2 = rgbToHsv(r2, g2, b2);
+  
+  // 色相は円環(0-360)なので、最短距離を求めるよ！✨ (0〜1に正規化)
+  const dh = Math.min(Math.abs(hsv1.h - hsv2.h), 360 - Math.abs(hsv1.h - hsv2.h)) / 180; 
+  const ds = Math.abs(hsv1.s - hsv2.s); // 0〜1
+  const dv = Math.abs(hsv1.v - hsv2.v); // 0〜1
+  
+  // 白黒グレーに近い（彩度が低い）と色相はブレやすいから、彩度(S)で色相の重みを調整！💖
+  const sWeight = Math.max(hsv1.s, hsv2.s);
+  const hsvDist = Math.sqrt(Math.pow(dh * sWeight * 2, 2) + Math.pow(ds, 2) + Math.pow(dv, 2)) * 255;
+
+  // RGBの物理的な差(40%)と、HSVの直感的な差(60%)をブレンドした最強のハイブリッド距離！✌️
+  return rgbDist * 0.4 + hsvDist * 0.6;
 }
 
