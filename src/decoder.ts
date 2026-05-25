@@ -1578,6 +1578,66 @@ export class ColorGridDecoder {
         }
       }
 
+      // --- 👇 垂直スキャン追加お！ 👇 ---
+      for (let x = 0; x < width; x += step) {
+        let stateCounts = [0, 0, 0, 0, 0];
+        let currentState = 0;
+
+        for (let y = 0; y < height; y++) {
+          const i = (y * width + x) * 4;
+          
+          const r = data[i], g = data[i+1], b = data[i+2];
+          const maxCh = Math.max(r, g, b);
+          const minCh = Math.min(r, g, b);
+          if (maxCh - minCh > 80) {
+            currentState = 0;
+            stateCounts = [0, 0, 0, 0, 0];
+            continue;
+          }
+
+          const black = isBlack(i);
+
+          if (currentState === 0 && stateCounts[0] === 0 && !black) {
+            continue;
+          }
+
+          if ((currentState % 2 === 0 && black) || (currentState % 2 === 1 && !black)) {
+            stateCounts[currentState]++;
+          } else {
+            if (currentState === 4) {
+              if (this.checkRatio(stateCounts, factor)) {
+                const cy = y - Math.floor(stateCounts[4] + stateCounts[3] + stateCounts[2] / 2);
+                const exactX = this.crossCheckHorizontal(imageData, x, cy, stateCounts[2], isBlack, factor);
+                if (exactX !== null) {
+                  const centerY = this.crossCheckVertical(imageData, exactX, cy, stateCounts[2], isBlack, factor);
+                  if (centerY !== null) {
+                    if (this.crossCheckDiagonal(imageData, exactX, centerY, stateCounts[2], isBlack, 1, 1) &&
+                        this.crossCheckDiagonal(imageData, exactX, centerY, stateCounts[2], isBlack, 1, -1)) {
+                      const total = stateCounts.reduce((a, b) => a + b, 0);
+                      const moduleSize = total / 7;
+                      centers.push({ x: exactX, y: centerY, estimatedModuleSize: moduleSize });
+                    }
+                  }
+                }
+                currentState = 0;
+                stateCounts = [0, 0, 0, 0, 0];
+              } else {
+                stateCounts[0] = stateCounts[2];
+                stateCounts[1] = stateCounts[3];
+                stateCounts[2] = stateCounts[4];
+                stateCounts[3] = 1;
+                stateCounts[4] = 0;
+                currentState = 3;
+              }
+            } else {
+              currentState++;
+              stateCounts[currentState] = 1;
+            }
+          }
+        }
+      }
+      // --- 👆 垂直スキャンここまで 👆 ---
+
       // クラスタリング
       const clusters: FinderCandidate[][] = [];
       let lastMergeRadius = 0;
