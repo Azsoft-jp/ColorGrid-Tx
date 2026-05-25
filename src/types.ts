@@ -59,7 +59,12 @@ export interface PhaseLog {
     | "success"       // デコード成功
     | "timing"        // タイミングデータからのプロファイル絞り込み
     | "timingCorrection" // タイミングパターン補正
-    | "payloadVote";    // 複数フレーム多数決
+    | "payloadVote"     // 複数フレーム多数決
+    | "resolution_warning" // 解像度警告
+    | "rotation_check"
+    | "rotation_try"
+    | "timing_post"
+    | "protocolTelemetry";
   ok: boolean;
   detail: string;    // 失敗理由や中間値の数値
   durationMs: number;

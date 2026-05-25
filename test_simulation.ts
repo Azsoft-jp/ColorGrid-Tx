@@ -153,12 +153,13 @@ async function runTest() {
       console.error(`❌ あちゃー！チャンク ${i} のデコードに失敗したよ🥺`);
       console.error(`理由: ${res.reason}`);
       if (res.debug) {
-        console.error("Debug stats:", {
-          clockValue: res.debug.clockValue,
-          estimatedGridSize: res.debug.estimatedGridSize,
-          finderPoints: res.debug.finderPoints,
-          phaseLogs: res.debug.phaseLogs
-        });
+        console.error("=== Debug stats for failing chunk ===");
+        console.error("Clock values:", { clockValue: res.debug.clockValue });
+        const mLogs = res.debug.phaseLogs.filter(p => p.detail.includes("[M]"));
+        console.error("M Profile Phase Logs:");
+        for (const log of mLogs) {
+          console.error(` - [${log.phase}] ok: ${log.ok}, detail: ${log.detail}`);
+        }
       }
       break;
     }

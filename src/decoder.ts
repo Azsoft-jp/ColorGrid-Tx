@@ -1,10 +1,11 @@
-import { DecodeResult, DecodeDebugInfo, DecodedChunk, Point, GRID_PROFILES, GridProfileId, PhaseLog } from "./types";
+import { DecodeResult, DecodeDebugInfo, DecodedChunk, Point, GRID_PROFILES, GridProfileId, PhaseLog, Mat3 } from "./types";
 import { getPerspectiveTransform, perspectiveTransform, colorDistance } from "./math";
-import { isReservedCell, getHeaderCellIndex, unpackFrom3Bit, PALETTE_RGB } from "./utils";
+import { isReservedCell, getHeaderCellIndex, unpackFrom3Bit, unpackFrom3BitWithErasures, Unpack3BitResult, PALETTE_RGB, getAlignmentCenters, getColorGridMask, getBlocksConfig } from "./utils";
 import { crc32 } from "./checksum";
 import { ReedSolomon } from "./rs";
 
 export class ColorGridDecoder {
+  public debugMode = true; // ログは最初から最高潮に出すっしょ！✌️✨
   private rs = new ReedSolomon();
   private lastClockValue = -1;
   private lastSuccessProfileId: GridProfileId | null = null; // ✌️ 前フレームで大成功したプロファイルIDを覚えておくお！💖
@@ -366,7 +367,7 @@ export class ColorGridDecoder {
     for (const pId of baseCandidates) {
       const p = GRID_PROFILES[pId];
       const cw = spanPx / (p.size - p.finderSize);
-      if (cw >= 2.0 && cw <= 10.0) {
+      if (cw >= 1.8 && cw <= 24.0) {
         distanceFilteredProfiles.push({ pId, cw });
       }
     }
@@ -436,7 +437,7 @@ export class ColorGridDecoder {
 
       const homographyStart = performance.now();
       
-      let mat: number[] | null = null;
+      let mat: Mat3 | null = null;
       let rotTryLogs: string[] = [];
 
       const co = centerOff;
@@ -479,7 +480,7 @@ export class ColorGridDecoder {
         }
 
         const rotName = rot===0?"0°":rot===1?"90°CW":rot===2?"180°":"270°CW";
-        const isValid = tempPalette.length >= 6 && maxColorDist > 150 && colorfulCount >= 3 && blackCount >= 1;
+        const isValid = rot === 0 || (tempPalette.length >= 6 && maxColorDist > 150 && colorfulCount >= 3 && blackCount >= 1);
         rotTryLogs.push(`${rotName}→pal_dist=${Math.round(maxColorDist)}${isValid ? "✅" : "❌"}`);
 
         mat = t_mat;
@@ -509,7 +510,7 @@ export class ColorGridDecoder {
       const pt1 = perspectiveTransform({x:1, y:0}, mat);
       const cellWidth = Math.hypot(pt1.x - pt0.x, pt1.y - pt0.y);
 
-      if (cellWidth < 2.0) {
+      if (cellWidth < 1.8) {
         phaseLogs.push({
           phase: "homography",
           ok: false,
@@ -517,6 +518,15 @@ export class ColorGridDecoder {
           durationMs: homographyDuration
         });
         continue;
+      }
+
+      if (cellWidth < 2.5 && pId !== "XS") {
+        phaseLogs.push({
+          phase: "resolution_warning",
+          ok: true,
+          detail: `[${pId}] cellWidth/cw is low (${cellWidth.toFixed(2)}px). S+ requires >=3px, ideally >=4px.`,
+          durationMs: 0
+        });
       }
 
       phaseLogs.push({
@@ -541,14 +551,17 @@ export class ColorGridDecoder {
         sampleRadius = maxRadius;
       }
 
-      // AP(アライメントパターン)による補正
+      // 複数アライメントパターン(AP)の検出
       const isIdealBlack = (dx: number, dy: number): boolean => {
         return (dx === 0 && dy === 0) || Math.max(Math.abs(dx), Math.abs(dy)) === 2;
       };
 
       const alignmentStart = performance.now();
+      const apCenters = getAlignmentCenters(N, pId);
+      const detectedAPs: { theory: Point; real: Point; offset: { dx: number; dy: number } }[] = [];
+      const apLogs: string[] = [];
 
-      const calculateAPContrastAt = (sx: number, sy: number): number => {
+      const calculateAPContrastAt = (ap: Point, sx: number, sy: number): number => {
         let sumWhiteLuma = 0;
         let countWhite = 0;
         let sumBlackLuma = 0;
@@ -556,7 +569,7 @@ export class ColorGridDecoder {
 
         for (let dy = -2; dy <= 2; dy++) {
           for (let dx = -2; dx <= 2; dx++) {
-            const pt = perspectiveTransform({ x: N - 6 + sx + dx, y: N - 6 + sy + dy }, mat);
+            const pt = perspectiveTransform({ x: ap.x + sx + dx, y: ap.y + sy + dy }, mat);
             const col = this.sampleColor(imageData, pt.x, pt.y, sampleRadius);
             if (!col) continue;
 
@@ -583,91 +596,123 @@ export class ColorGridDecoder {
         return -Infinity;
       };
 
-      // 第1段階: ±2.0セル、0.2刻みで粗探索
-      let coarseBestX = 0;
-      let coarseBestY = 0;
-      let coarseMaxContrast = -Infinity;
+      for (const ap of apCenters) {
+        // 第1段階: ±2.0セル、0.2刻みで粗探索 (シフトが小さいほど優遇するためのスコアリングを導入するよ✨)
+        let coarseBestX = 0;
+        let coarseBestY = 0;
+        let coarseMaxScore = -Infinity;
+        let coarseBestContrast = -Infinity;
 
-      for (let sy = -2.0; sy <= 2.0; sy += 0.2) {
-        for (let sx = -2.0; sx <= 2.0; sx += 0.2) {
-          const contrast = calculateAPContrastAt(sx, sy);
-          if (contrast > coarseMaxContrast) {
-            coarseMaxContrast = contrast;
-            coarseBestX = sx;
-            coarseBestY = sy;
+        for (let sy = -2.0; sy <= 2.0; sy += 0.2) {
+          for (let sx = -2.0; sx <= 2.0; sx += 0.2) {
+            const contrast = calculateAPContrastAt(ap, sx, sy);
+            if (contrast === -Infinity) continue;
+            // ずれ（sx, sy）の二乗距離に比例したペナルティ
+            const score = contrast - 10 * (sx * sx + sy * sy);
+            if (score > coarseMaxScore) {
+              coarseMaxScore = score;
+              coarseBestX = sx;
+              coarseBestY = sy;
+              coarseBestContrast = contrast;
+            }
           }
         }
-      }
 
-      // 第2段階: 第1段階の最大コントラスト点±0.3セル、0.05刻みで精探索
-      let bestShiftX = coarseBestX;
-      let bestShiftY = coarseBestY;
-      let maxContrast = coarseMaxContrast;
+        // 第2段階: 精探索
+        let bestShiftX = coarseBestX;
+        let bestShiftY = coarseBestY;
+        let maxScore = coarseMaxScore;
+        let bestContrast = coarseBestContrast;
 
-      for (let sy = coarseBestY - 0.3; sy <= coarseBestY + 0.3; sy += 0.05) {
-        for (let sx = coarseBestX - 0.3; sx <= coarseBestX + 0.3; sx += 0.05) {
-          const contrast = calculateAPContrastAt(sx, sy);
-          if (contrast > maxContrast) {
-            maxContrast = contrast;
-            bestShiftX = sx;
-            bestShiftY = sy;
+        for (let sy = coarseBestY - 0.3; sy <= coarseBestY + 0.3; sy += 0.05) {
+          for (let sx = coarseBestX - 0.3; sx <= coarseBestX + 0.3; sx += 0.05) {
+            const contrast = calculateAPContrastAt(ap, sx, sy);
+            if (contrast === -Infinity) continue;
+            const score = contrast - 10 * (sx * sx + sy * sy);
+            if (score > maxScore) {
+              maxScore = score;
+              bestShiftX = sx;
+              bestShiftY = sy;
+              bestContrast = contrast;
+            }
           }
+        }
+
+        if (bestContrast !== -Infinity && bestContrast > 10) {
+          const paraPt = perspectiveTransform(ap, mat);
+          const realPt = perspectiveTransform({ x: ap.x + bestShiftX, y: ap.y + bestShiftY }, mat);
+          const offset = {
+            dx: realPt.x - paraPt.x,
+            dy: realPt.y - paraPt.y
+          };
+          detectedAPs.push({
+            theory: ap,
+            real: realPt,
+            offset
+          });
+          apLogs.push(`AP(${ap.x},${ap.y}) contrast:${bestContrast.toFixed(1)} shift:${Math.hypot(offset.dx, offset.dy).toFixed(1)}px`);
+        } else {
+          apLogs.push(`AP(${ap.x},${ap.y}) fallback/not-detected`);
         }
       }
 
       const alignmentDuration = performance.now() - alignmentStart;
+      const apSummaryDetail = `[${pId}] Alignment calibration: ${detectedAPs.length}/${apCenters.length} APs localized. \n` + apLogs.join("\n");
 
-      // 平行四辺形BRと実測APのズレをピクセルで計算！✨
-      const paraBR = perspectiveTransform({ x: N - 6, y: N - 6 }, mat);
-      const realAP = perspectiveTransform({ x: N - 6 + bestShiftX, y: N - 6 + bestShiftY }, mat);
-      const shiftPx = Math.hypot(realAP.x - paraBR.x, realAP.y - paraBR.y);
-
-      // ズレが20px以上の場合は警告
-      const shiftWarning = shiftPx >= 20 ? "⚠️ " : "";
-      const alignmentDetail = `[${pId}] ${shiftWarning}BR shift: ${shiftPx.toFixed(1)}px, contrast1: ${coarseMaxContrast === -Infinity ? "N/A" : coarseMaxContrast.toFixed(1)}, contrast2: ${maxContrast === -Infinity ? "N/A" : maxContrast.toFixed(1)}`;
-
-      if (maxContrast === -Infinity) {
-        phaseLogs.push({
-          phase: "alignment",
-          ok: false,
-          detail: `[${pId}] エラー。有効なAPコントラストが検出されなかったみ🥺 ` + alignmentDetail,
-          durationMs: alignmentDuration
-        });
-        continue;
-      } else {
-        phaseLogs.push({
-          phase: "alignment",
-          ok: true,
-          detail: alignmentDetail,
-          durationMs: alignmentDuration
-        });
-
-        // コントラストが低い場合は警告ログを出す仕様にするっしょ！✌️🔥
-        if (maxContrast < 12) {
-          log.push(`warning: AP contrast is low (${maxContrast.toFixed(2)}), using fallback best shift`);
-        }
-
+      // 基本のホモグラフィ mat を、検出した右下AP (N-6, N-6) に基づいてアップデート (4点補正ホモグラフィ更新)
+      const bottomRightAP = detectedAPs.find(v => v.theory.x === N - 6 && v.theory.y === N - 6);
+      if (bottomRightAP) {
         const dstPointsAP = [
           { x: centerOff, y: centerOff },
           { x: N - centerOff, y: centerOff },
           { x: N - 6, y: N - 6 },
           { x: centerOff, y: N - centerOff },
         ];
-
         const srcPointsAP = [
           TL,
           TR,
-          realAP,
+          bottomRightAP.real,
           BL,
         ];
-
         const matAP = getPerspectiveTransform(dstPointsAP, srcPointsAP);
         if (matAP) {
           mat = matAP;
         }
       }
 
-      // 📐 タイミングパターンの非線形歪み補正エンジン！✨ (v1.6.0 異次元の精度向上！)
+      phaseLogs.push({
+        phase: "alignment",
+        ok: detectedAPs.length > 0,
+        detail: apSummaryDetail,
+        durationMs: alignmentDuration
+      });
+
+      // IDW (Inverse Distance Weighting) ローカルオフセット補間
+      const getLocalOffset = (cx: number, cy: number): { dx: number, dy: number } => {
+        if (detectedAPs.length === 0) return { dx: 0, dy: 0 };
+        
+        let sumWeight = 0;
+        let sumDx = 0;
+        let sumDy = 0;
+        
+        for (const item of detectedAPs) {
+          const dist = Math.hypot(cx - item.theory.x, cy - item.theory.y);
+          if (dist < 0.1) {
+            return item.offset;
+          }
+          const weight = 1.0 / (dist * dist);
+          sumDx += item.offset.dx * weight;
+          sumDy += item.offset.dy * weight;
+          sumWeight += weight;
+        }
+        
+        return {
+          dx: sumDx / sumWeight,
+          dy: sumDy / sumWeight
+        };
+      };
+
+      // 📐 タイミングパターンによる微調整補正 📐
       const timingStart = performance.now();
       let timingSign = 1;
       let signSumForward = 0;
@@ -825,15 +870,21 @@ export class ColorGridDecoder {
 
       const getCorrectedPt = (cx: number, cy: number): Point => {
         const ptTheo = perspectiveTransform({ x: cx, y: cy }, mat);
-        if (!shouldApplyTimingCorrection) {
-          return ptTheo;
+        
+        // 1. AP(アライメントパターン)による歪み補正を取得
+        const offAP = getLocalOffset(cx, cy);
+
+        // 2. タイミングパターンによる追加の歪み補正を取得
+        let offH = { dx: 0, dy: 0 };
+        let offV = { dx: 0, dy: 0 };
+        if (shouldApplyTimingCorrection) {
+          offH = interpolateOffset(horizontalOffsets, cx);
+          offV = interpolateOffset(verticalOffsets, cy);
         }
-        const offH = interpolateOffset(horizontalOffsets, cx);
-        const offV = interpolateOffset(verticalOffsets, cy);
 
         return {
-          x: ptTheo.x + offH.dx + offV.dx,
-          y: ptTheo.y + offH.dy + offV.dy
+          x: ptTheo.x + offAP.dx + offH.dx + offV.dx,
+          y: ptTheo.y + offAP.dy + offH.dy + offV.dy
         };
       };
 
@@ -916,8 +967,7 @@ export class ColorGridDecoder {
       });
 
       if (!timingPostOk && estimatedNPost !== -1) {
-        log.push(`${pId}: post-AP timing check failed`);
-        continue;
+        log.push(`${pId}: post-AP timing check failed (warning, fallback to decoding)`);
       }
       // ------ タイミング再推定 ここまで ------
 
@@ -942,8 +992,17 @@ export class ColorGridDecoder {
         ];
 
         let currentSampleRadius = sampleRadius;
-        if (cellWidth < 4.0) {
+        if (cellWidth < 6.0) {
           pts = [{ x: x_center + 0.5, y: 0.5 }];
+          currentSampleRadius = 0;
+        } else if (cellWidth < 9.0) {
+          pts = [
+            { x: x_center + 0.5, y: 0.5 }, // 中心
+            { x: x_center + 0.5, y: 0.3 }, // 上
+            { x: x_center + 0.5, y: 0.7 }, // 下
+            { x: x_center + 0.3, y: 0.5 }, // 左
+            { x: x_center + 0.7, y: 0.5 }  // 右
+          ];
           currentSampleRadius = 0;
         }
 
@@ -1051,7 +1110,7 @@ export class ColorGridDecoder {
       if (!clockCol) {
         phaseLogs.push({
           phase: "clock",
-          ok: true, // 警告扱いにするのでフェーズはok(true)にしてデコードを絶対に落とさない！✨
+          ok: true, 
           detail: `[${pId}] warning: 同期クロックのカラーサンプリング（RGB=null）失敗み🥺（デフォルト色0でフォールバックして続行！）`,
           durationMs: clockDuration
         });
@@ -1063,12 +1122,12 @@ export class ColorGridDecoder {
         if (measuredClockVal === -1) {
           phaseLogs.push({
             phase: "clock",
-            ok: true, // 曖昧でもエラーとしてコケるのを完封するため、デコードは落とさず進む💖
+            ok: true, 
             detail: `[${pId}] warning: 同期クロックが曖昧(-1)み🥺（安全フォールバックでデコード続行！） ` + clockDetail,
             durationMs: clockDuration
           });
           log.push(`${pId}: clock read ambiguous (fallback logic engaged)`);
-          clockVal = 0; // 曖昧な場合は安全なデフォルト値をセット！
+          clockVal = 0; 
         } else {
           phaseLogs.push({
             phase: "clock",
@@ -1113,7 +1172,7 @@ export class ColorGridDecoder {
                 headerLogs.push(logStr);
             }
 
-            if (mCol === -1) { headerOk = false; break; }
+            // -1 も許容してそのまま入れるお！消失はRSで訂正するから大丈夫っしょ✨
             headerRaw[hIdx] = mCol;
           }
         }
@@ -1133,9 +1192,11 @@ export class ColorGridDecoder {
         continue;
       }
 
-      const headerBytesEnc = unpackFrom3Bit(new Uint8Array(headerRaw), 24);
+      const unpackResult = unpackFrom3BitWithErasures(headerRaw, 24);
+      const headerBytesEnc = unpackResult.bytes;
+      const erasures = unpackResult.erasureBytePositions;
       const toHex = (arr: Uint8Array) => Array.from(arr).map(b => b.toString(16).padStart(2, "0")).join(" ");
-      const headerEncStr = `headerEnc: ${toHex(headerBytesEnc)}`;
+      const headerEncStr = `headerEnc: ${toHex(headerBytesEnc)} erasures: [${erasures.join(",")}]`;
 
       if (headerBytesEnc.length < 24) {
         const headerRSDuration = performance.now() - headerRSStart;
@@ -1148,7 +1209,7 @@ export class ColorGridDecoder {
         continue;
       }
 
-      const headerBytes = this.rs.decode(headerBytesEnc, 12);
+      const headerBytes = this.rs.decode(headerBytesEnc, 12, erasures);
       const headerRSDuration = performance.now() - headerRSStart;
 
       if (!headerBytes) {
@@ -1184,11 +1245,11 @@ export class ColorGridDecoder {
         durationMs: headerRSDuration
       });
 
-      if (magic !== 0xC6) {
+      if (magic !== 0xC6 && magic !== 0xC7) {
         phaseLogs.push({
           phase: "magic",
           ok: false,
-          detail: `[${pId}] Magicバイト不一致み🥺 magic: expected=0xC6 actual=0x${magic.toString(16).toUpperCase()}\n${headerRawStr}\n${headerEncStr}`,
+          detail: `[${pId}] Magicバイト不一致み🥺 magic: expected=0xC6/0xC7 actual=0x${magic.toString(16).toUpperCase()}\n${headerRawStr}\n${headerEncStr}`,
           durationMs: magicDuration
         });
         log.push(`${pId}: magic mismatch (${magic.toString(16)})`);
@@ -1197,14 +1258,16 @@ export class ColorGridDecoder {
         phaseLogs.push({
           phase: "magic",
           ok: true,
-          detail: `[${pId}] Magicバイト一致お！ magic: expected=0xC6 actual=0x${magic.toString(16).toUpperCase()}`,
+          detail: `[${pId}] Magicバイト一致お！ magic: expected=0xC6/0xC7 actual=0x${magic.toString(16).toUpperCase()}`,
           durationMs: magicDuration
         });
       }
 
       debug.detectedProfileId = pId;
       debug.estimatedGridSize = profile.size;
-      const pIdx = view.getUint8(1);
+      const secondByte = view.getUint8(1);
+      const pIdx = secondByte & 0x0F;
+      const maskPattern = (magic === 0xC7) ? ((secondByte >>> 4) & 0x07) : 0;
       const chunkIndex = view.getUint16(2, false);
       const totalChunks = view.getUint16(4, false);
       const payloadLength = view.getUint16(6, false);
@@ -1213,9 +1276,6 @@ export class ColorGridDecoder {
       this.lastClockValue = clockVal;
 
       const payloadStart = performance.now();
-      // 空きセルはエンコーダ側でシード既知の疑似乱数色で埋められているため
-      // payloadLength を超えたセルは読み取らない（意図的）
-      // ペイロード読み取り＆複数フレームの色判定多数決統合システム！✨ (v1.6.0)
       if (this.voteChunkIndex !== chunkIndex) {
         this.voteBuffer.clear();
         this.voteChunkIndex = chunkIndex;
@@ -1235,10 +1295,15 @@ export class ColorGridDecoder {
         for (let x = 0; x < N; x++) {
           if (!isReservedCell(x, y, profile)) {
             const pt = getCorrectedPt(x + 0.5, y + 0.5);
-            debugSampled.push(pt);
+            if (pId === "XS" && debugSampled.length < 1000) {
+              debugSampled.push(pt);
+            }
             
             const col = this.sampleColor(imageData, pt.x, pt.y, sampleRadius);
-            const currentVal = col ? this.matchColor(col, readPalette) : -1;
+            const rawVal = col ? this.matchColor(col, readPalette) : -1;
+            
+            // 新仕様: マスク適用時は XOR 逆マスク！✨
+            const currentVal = (rawVal === -1) ? -1 : ((magic === 0xC7) ? (rawVal ^ getColorGridMask(maskPattern, x, y)) : rawVal);
 
             const key = `${x},${y}`;
             let history = this.voteBuffer.get(key);
@@ -1276,7 +1341,6 @@ export class ColorGridDecoder {
                   }
                 }
 
-                // 最頻値が過半数（有効な投票総数の半分より多い場合）を満たすかチェック！✨
                 if (maxCount * 2 > validCount) {
                   finalVal = maxVal;
                   if (finalVal !== -1) {
@@ -1293,7 +1357,6 @@ export class ColorGridDecoder {
                 uncertainCount++;
               }
             } else {
-              // 2フレーム未満なら多数決せずにそのまま生値を採用
               if (finalVal === -1) {
                 uncertainCount++;
               }
@@ -1307,7 +1370,6 @@ export class ColorGridDecoder {
 
       const payloadDuration = performance.now() - payloadStart;
 
-      // 多数決統合の実行状況を診断 phaseLogs にお茶目に刻み込む！💖
       if (totalHistoryLength >= 2) {
         phaseLogs.push({
           phase: "payloadVote",
@@ -1324,14 +1386,145 @@ export class ColorGridDecoder {
         });
       }
 
-      const totalPayloadBytes = payloadLength + Math.ceil(payloadLength * 0.25);
-      const encodedPayload = unpackFrom3Bit(new Uint8Array(payload3bit), totalPayloadBytes);
-      
+      // Payload デコード ＆ Reed-Solomon ブロック復元
+      let payload = new Uint8Array(0);
+      let payloadErasures: number[] = [];
+      let inputLengthForLog = 0;
+      let parityLengthForLog = 0;
       const payloadDecStart = performance.now();
-      const payload = this.rs.decode(encodedPayload, Math.ceil(payloadLength * 0.25)) || new Uint8Array(0);
+
+      if (magic === 0xC7) {
+        // 🚀 新プロトコル：複数ブロック＆インターリーブデコード 🚀
+        const configs = getBlocksConfig(payloadLength);
+        const totalParityBytes = configs.reduce((sum, c) => sum + c.paritySize, 0);
+        const totalPayloadBytes = payloadLength + totalParityBytes;
+        inputLengthForLog = totalPayloadBytes;
+        parityLengthForLog = totalParityBytes;
+
+        const unpacking = unpackFrom3BitWithErasures(payload3bit, totalPayloadBytes);
+        const fullBytes = unpacking.bytes;
+        const fullErasures = new Set(unpacking.erasureBytePositions);
+        payloadErasures = unpacking.erasureBytePositions;
+
+        const dataBlocks: Uint8Array[] = configs.map(c => new Uint8Array(c.dataSize));
+        const parityBlocks: Uint8Array[] = configs.map(c => new Uint8Array(c.paritySize));
+        const blockErasures: number[][] = configs.map(() => []);
+
+        let byteIdx = 0;
+
+        // データ部デインターリーブ
+        const maxDataLen = Math.max(...configs.map(c => c.dataSize));
+        for (let i = 0; i < maxDataLen; i++) {
+          for (let b = 0; b < configs.length; b++) {
+            const config = configs[b];
+            if (i < config.dataSize) {
+              dataBlocks[b][i] = fullBytes[byteIdx];
+              if (fullErasures.has(byteIdx)) {
+                blockErasures[b].push(i);
+              }
+              byteIdx++;
+            }
+          }
+        }
+
+        // パリティ部デインターリーブ
+        const maxParityLen = Math.max(...configs.map(c => c.paritySize));
+        for (let i = 0; i < maxParityLen; i++) {
+          for (let b = 0; b < configs.length; b++) {
+            const config = configs[b];
+            if (i < config.paritySize) {
+              parityBlocks[b][i] = fullBytes[byteIdx];
+              if (fullErasures.has(byteIdx)) {
+                blockErasures[b].push(config.dataSize + i);
+              }
+              byteIdx++;
+            }
+          }
+        }
+
+        // 各ブロック個別にRSデコード
+        const decodedParts: Uint8Array[] = [];
+        let rsSuccess = true;
+
+        for (let b = 0; b < configs.length; b++) {
+          const config = configs[b];
+          const blockEnc = new Uint8Array(config.dataSize + config.paritySize);
+          blockEnc.set(dataBlocks[b], 0);
+          blockEnc.set(parityBlocks[b], config.dataSize);
+
+          const blockDec = this.rs.decode(
+            blockEnc,
+            config.paritySize,
+            blockErasures[b]
+          );
+
+          if (!blockDec) {
+            rsSuccess = false;
+            break;
+          }
+          decodedParts.push(blockDec);
+        }
+
+        if (rsSuccess) {
+          const merged = new Uint8Array(payloadLength);
+          let offset = 0;
+          for (const part of decodedParts) {
+            merged.set(part, offset);
+            offset += part.length;
+          }
+          payload = merged;
+        } else {
+          payload = new Uint8Array(0);
+        }
+
+      } else {
+        // 🦖 旧プロトコル：単一ブロック＆インターリーブなしデコード 🦖
+        const totalPayloadBytes = payloadLength + Math.ceil(payloadLength * 0.25);
+        inputLengthForLog = totalPayloadBytes;
+        parityLengthForLog = Math.ceil(payloadLength * 0.25);
+
+        const unpackRes = unpackFrom3BitWithErasures(payload3bit, totalPayloadBytes);
+        const encodedPayload = unpackRes.bytes;
+        payloadErasures = unpackRes.erasureBytePositions;
+
+        payload = this.rs.decode(
+          encodedPayload,
+          Math.ceil(payloadLength * 0.25),
+          payloadErasures
+        ) || new Uint8Array(0);
+      }
       const payloadDecDuration = performance.now() - payloadDecStart;
 
       const pCrc = (payload.length > 0) ? crc32(payload) : 0;
+      
+      if (this.debugMode) {
+        let maxPaletteSpread = 0;
+        for (let i = 0; i < readPalette.length; i++) {
+          const c = readPalette[i];
+          for (let j = i + 1; j < readPalette.length; j++) {
+            const dist = colorDistance(c.r, c.g, c.b, readPalette[j].r, readPalette[j].g, readPalette[j].b);
+            if (dist > maxPaletteSpread) maxPaletteSpread = dist;
+          }
+        }
+        phaseLogs.push({
+          phase: "protocolTelemetry",
+          ok: payload.length > 0,
+          detail: `[${pId}] Telemetry metrics:\n` +
+                  `  profileId: ${pId}\n` +
+                  `  cellWidth: ${cellWidth.toFixed(2)} [spanPx: ${spanPx.toFixed(1)}]\n` +
+                  `  candidateProfiles: ${candidateProfiles.join(",")}\n` +
+                  `  estimatedN: ${estimatedN} [estimatedNPost: ${estimatedNPost}]\n` +
+                  `  timingTransitions: h:${horizontalOffsets.length} v:${verticalOffsets.length}\n` +
+                  `  paletteSpread: maxDist=${maxPaletteColorDist.toFixed(1)} colorfulCount=${colorfulCount}\n` +
+                  `  headerRaw: [${headerRaw.slice(0, 10).join(",")}]\n` +
+                  `  payloadErasures: count=${payloadErasures.length}\n` +
+                  `  voteHistoryLength: max=${totalHistoryLength} (applied:${voteAppliedCount}, uncertain:${uncertainCount})\n` +
+                  `  RSDecodedInputLen: ${inputLengthForLog} bytes [RSParityLen: ${parityLengthForLog} bytes]\n` +
+                  `  CRCExpected: 0x${payloadChecksum.toString(16).toUpperCase()} [CRCActual: 0x${pCrc.toString(16).toUpperCase()}]\n` +
+                  `  magic: 0x${magic.toString(16).toUpperCase()} [maskPattern: ${maskPattern}]`,
+          durationMs: payloadDecDuration
+        });
+      }
       debug.crcOk = (pCrc === payloadChecksum);
 
       const crcDetail = `[${pId}] 期待CRC値: 0x${payloadChecksum.toString(16).toUpperCase()}, 実測CRC値: 0x${pCrc.toString(16).toUpperCase()}`;
@@ -1527,15 +1720,6 @@ export class ColorGridDecoder {
         for (let x = 0; x < width; x++) {
           const i = (y * width + x) * 4;
           
-          const r = data[i], g = data[i+1], b = data[i+2];
-          const maxCh = Math.max(r, g, b);
-          const minCh = Math.min(r, g, b);
-          if (maxCh - minCh > 80) {
-            currentState = 0;
-            stateCounts = [0, 0, 0, 0, 0];
-            continue;
-          }
-
           const black = isBlack(i);
 
           if (currentState === 0 && stateCounts[0] === 0 && !black) {
@@ -1586,15 +1770,6 @@ export class ColorGridDecoder {
         for (let y = 0; y < height; y++) {
           const i = (y * width + x) * 4;
           
-          const r = data[i], g = data[i+1], b = data[i+2];
-          const maxCh = Math.max(r, g, b);
-          const minCh = Math.min(r, g, b);
-          if (maxCh - minCh > 80) {
-            currentState = 0;
-            stateCounts = [0, 0, 0, 0, 0];
-            continue;
-          }
-
           const black = isBlack(i);
 
           if (currentState === 0 && stateCounts[0] === 0 && !black) {
@@ -1679,12 +1854,12 @@ export class ColorGridDecoder {
       const filteredClusters: FinderCandidate[][] = [];
 
       for (const cluster of top10Clusters) {
-        // 条件A：クラスタのY座標の標準偏差が、推定モジュールサイズ × 3以上であること
+        // 条件A：クラスタのY座標の標準偏差が、推定モジュールサイズ × 3以下であること (大きすぎるものはノイズや結合ラインなので排除するよ✨)
         const avgModuleSize = cluster.reduce((sum, p) => sum + p.estimatedModuleSize, 0) / cluster.length;
         const varianceY = getVarianceY(cluster);
         const stdDevY = Math.sqrt(varianceY);
         const limitA = avgModuleSize * 3;
-        const okA = stdDevY >= limitA;
+        const okA = stdDevY <= limitA;
 
         // 条件B：クラスタのサイズが、全クラスタの中の最大サイズの10%以上、かつ最低3点
         const limitB = maxSize * 0.1;
@@ -1728,11 +1903,8 @@ export class ColorGridDecoder {
       }
     }
 
-    finalClusters.sort((a, b) => {
-      const varA = getVarianceY(a);
-      const varB = getVarianceY(b);
-      return varB - varA;
-    });
+    // 点数が多く、信頼性の高いクラスタ順（サイズ降順）にソートするお！✌️✨
+    finalClusters.sort((a, b) => b.length - a.length);
 
     (this as any).debugCentersCount = finalCenters.length;
     (this as any).debugClustersCount = finalClusters.length;
@@ -1761,8 +1933,7 @@ export class ColorGridDecoder {
     const data = imageData.data;
 
     const isColor = (idx: number) => {
-      const r = data[idx], g = data[idx+1], b = data[idx+2];
-      return (Math.max(r, g, b) - Math.min(r, g, b)) > 80;
+      return false; // 有彩色スキップを無効化お！🌈 色被りしててもファインダーを絶対見逃さない！
     };
     
     const vCounts = [0, 0, 0, 0, 0];
@@ -1870,8 +2041,7 @@ export class ColorGridDecoder {
     const data = imageData.data;
 
     const isColor = (idx: number) => {
-      const r = data[idx], g = data[idx+1], b = data[idx+2];
-      return (Math.max(r, g, b) - Math.min(r, g, b)) > 80;
+      return false; // 有彩色スキップを無効化お！🌈 色被りしててもファインダーを絶対見逃さない！
     };
     
     const hCounts = [0, 0, 0, 0, 0];
@@ -2048,41 +2218,58 @@ export class ColorGridDecoder {
     };
   }
 
-  private matchColor(col: { r: number, g: number, b: number }, palette: { r: number, g: number, b: number }[]): number {
-    // 💡 究極のハイブリッド判定！✨
-    // 1. 【RGB相対キューブ判定】白(7)と黒(0)の基準から、各RGBチャンネルの絶対的明暗の境界線を引く最強の環境グラデーション耐性！💪
-    const thR = (palette[0].r + palette[7].r) / 2;
-    const thG = (palette[0].g + palette[7].g) / 2;
-    const thB = (palette[0].b + palette[7].b) / 2;
-    const cubeIdx = (col.r > thR ? 4 : 0) | (col.g > thG ? 2 : 0) | (col.b > thB ? 1 : 0);
+  private matchColor(
+    col: { r: number; g: number; b: number },
+    palette: { r: number; g: number; b: number }[]
+  ): number {
+    const thR = (palette[0].r + palette[4].r) / 2;
+    const thG = (palette[0].g + palette[2].g) / 2;
+    const thB = (palette[0].b + palette[1].b) / 2;
 
-    // 2. 【HSV空間NN判定】色温度シフト（暖色電球など）に対する色相ベースの直感的な近さ！💖
+    const margin = 24;
+
+    const ambR = Math.abs(col.r - thR) <= margin;
+    const ambG = Math.abs(col.g - thG) <= margin;
+    const ambB = Math.abs(col.b - thB) <= margin;
+
+    const ambiguousChannels = Number(ambR) + Number(ambG) + Number(ambB);
+
+    // 1chだけ曖昧なら残り2chで判定可能。
+    // 2ch以上が曖昧なら消失扱い。
+    if (ambiguousChannels >= 2) {
+      return -1;
+    }
+
+    const cubeIdx =
+      (col.r > thR ? 4 : 0) |
+      (col.g > thG ? 2 : 0) |
+      (col.b > thB ? 1 : 0);
+
+    // 最近傍との整合性チェック
     let minDist = Infinity;
+    let secondDist = Infinity;
     let minIdx = -1;
+
     for (let i = 0; i < 8; i++) {
-      const dist = colorDistance(col.r, col.g, col.b,
-                                 palette[i].r, palette[i].g, palette[i].b);
-      if (dist < minDist) { minDist = dist; minIdx = i; }
+      const d = colorDistance(
+        col.r, col.g, col.b,
+        palette[i].r, palette[i].g, palette[i].b
+      );
+
+      if (d < minDist) {
+        secondDist = minDist;
+        minDist = d;
+        minIdx = i;
+      } else if (d < secondDist) {
+        secondDist = d;
+      }
     }
 
-    if (minDist > 150) return cubeIdx; // NNが遠すぎる場合は確実にcubeIdxを採用！
-
-    if (cubeIdx === minIdx) {
-      return cubeIdx;
+    // cube判定と最近傍が割れて、距離差も小さいなら曖昧
+    if (cubeIdx !== minIdx && secondDist - minDist < 18) {
+      return -1;
     }
 
-    // 意見が割れた場合🚨
-    // 白飛び・黒潰れ環境や、無彩色(0, 7)の判定において、HSVの Nearest Neighbor は色相が暴れて非常に脆弱になるみ🥺
-    // そこで、対象の色が彩度が低め（白や黒、グレー）である場合、またはキューブ判定が白(7)か黒(0)を示す場合は
-    // 相対コントラストに基づく「キューブ判定」を絶対正義とする！！🔥
-    const maxC = Math.max(col.r, col.g, col.b);
-    const minC = Math.min(col.r, col.g, col.b);
-    
-    if ((maxC - minC) < 30 || cubeIdx === 0 || cubeIdx === 7) {
-      return cubeIdx;
-    }
-
-    // 彩度が高い（カラフルな色）においては、HSVによる色相マッチング（minIdx）の意見を尊重する！✨
-    return minIdx;
+    return cubeIdx;
   }
 }

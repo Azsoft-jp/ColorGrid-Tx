@@ -147,6 +147,55 @@ export default function App() {
   const [lastErrorReason, setLastErrorReason] = useState("");
   const decoderRef = useRef(new ColorGridDecoder());
 
+  // 🔍 iOSのカメラぼやけ・ピント対策用の神パラメータたち！💖
+  const [hardwareZoomSupported, setHardwareZoomSupported] = useState(false);
+  const [zoomMin, setZoomMin] = useState(1);
+  const [zoomMax, setZoomMax] = useState(3);
+  const [zoomVal, setZoomVal] = useState(1.5);
+  const cameraTrackRef = useRef<MediaStreamTrack | null>(null);
+
+  const handleZoomChange = async (newVal: number) => {
+    setZoomVal(newVal);
+    if (hardwareZoomSupported && cameraTrackRef.current) {
+      try {
+        await cameraTrackRef.current.applyConstraints({
+          advanced: [{ zoom: newVal } as any]
+        });
+      } catch (err) {
+        console.warn("ズーム適用エラー💦:", err);
+      }
+    }
+  };
+
+  const triggerAutoFocus = async () => {
+    if (cameraTrackRef.current) {
+      try {
+        // フォーカスを強制再トリガーするために、一瞬だけズーム値を揺らすお！✨
+        const currZoom = zoomVal;
+        const tempZoom = currZoom > 1.1 ? currZoom - 0.1 : currZoom + 0.1;
+        if (hardwareZoomSupported) {
+          await cameraTrackRef.current.applyConstraints({
+            advanced: [{ zoom: tempZoom } as any]
+          });
+          setTimeout(async () => {
+            if (cameraTrackRef.current) {
+              await cameraTrackRef.current.applyConstraints({
+                advanced: [{ zoom: currZoom } as any, { focusMode: "continuous" } as any]
+              });
+            }
+          }, 100);
+        } else {
+          // ソフトウェアズーム時はダミーの連続オートフォーカス制約を再適用してSafariのAFをキックする！💖
+          await cameraTrackRef.current.applyConstraints({
+            advanced: [{ focusMode: "continuous" } as any]
+          });
+        }
+      } catch (err) {
+        console.warn("オートフォーカス再起動エラー🥺:", err);
+      }
+    }
+  };
+
   // 🛠 デバッグUI用の神パラメータたち！✨
   const [isFreezeLog, setIsFreezeLog] = useState(false);
   const isFreezeLogRef = useRef(false);
@@ -213,12 +262,49 @@ export default function App() {
   const startCamera = async () => {
     resetReceiver(); // 起動時にクリアして、新鮮なデータを受信できるようにする💖
     try {
+      // 1080P指定にすることで、近くのフォーカスが合うカメラモジュールが選ばれやすくする！✨
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }
+        video: { 
+          facingMode: "environment", 
+          width: { ideal: 1920 }, 
+          height: { ideal: 1080 },
+          // advancedでfocusModeや初期ズームをブラウザに提案するお！💖
+          advanced: [
+            { focusMode: "continuous" } as any,
+            { zoom: 1.5 } as any
+          ]
+        }
       });
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         setIsCameraOn(true);
+
+        const [track] = stream.getVideoTracks();
+        if (track) {
+          cameraTrackRef.current = track;
+          const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+          if ('zoom' in capabilities) {
+            const zoomCap = (capabilities as any).zoom;
+            setHardwareZoomSupported(true);
+            setZoomMin(zoomCap.min || 1);
+            setZoomMax(zoomCap.max || 3);
+            // 初期ズームを 1.5倍（または最大値より小さめの値）に自動適用するよ！✨
+            const initZoom = Math.min(1.5, zoomCap.max || 1.5);
+            setZoomVal(initZoom);
+            try {
+              await track.applyConstraints({
+                advanced: [{ zoom: initZoom } as any]
+              });
+            } catch (err) {
+              console.warn("初期ズームの適用に失敗したみ🥺:", err);
+            }
+          } else {
+            setHardwareZoomSupported(false);
+            setZoomMin(1.0);
+            setZoomMax(3.0);
+            setZoomVal(1.5); // ソフトウェアズームの初期値を1.5xにしてピンぼけを最初から防ぐお！💖
+          }
+        }
       }
     } catch (e) {
       setTestResult({
@@ -236,6 +322,9 @@ export default function App() {
       videoRef.current.srcObject = null;
     }
     setIsCameraOn(false);
+    // ズーム関連のクリーンアップ
+    cameraTrackRef.current = null;
+    setHardwareZoomSupported(false);
   };
 
   // 🔄 送信側のACKフィードバック監視カメラの起動・終了ロジックだよ！✨
@@ -292,17 +381,26 @@ export default function App() {
           canvas.height = video.videoHeight;
           const ctx = canvas.getContext("2d");
           if (ctx) {
-            // 背景透過クリアしてデバッグ描画用にする
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // ハイブリッドズームロジック：ハードウェアズーム未サポート時はソフトウェア側でトリミング切り出し拡大するお！💖
+            const swZoom = hardwareZoomSupported ? 1.0 : zoomVal;
+            const vw = video.videoWidth;
+            const vh = video.videoHeight;
+            const sw = vw / swZoom;
+            const sh = vh / swZoom;
+            const sx = (vw - sw) / 2;
+            const sy = (vh - sh) / 2;
+
+            // 1. まず表示用キャンバスに（ソフトズーム適用済みの）映像を描画する！✨
+            ctx.drawImage(video, sx, sy, sw, sh, 0, 0, vw, vh);
             
             // 解析用に裏のCanvasに映像をコピーしてImageData取得する
             const offscreenCanvas = document.createElement('canvas');
-            offscreenCanvas.width = video.videoWidth;
-            offscreenCanvas.height = video.videoHeight;
+            offscreenCanvas.width = vw;
+            offscreenCanvas.height = vh;
             const oCtx = offscreenCanvas.getContext("2d");
             if (oCtx) {
-                oCtx.drawImage(video, 0, 0);
-                const imageData = oCtx.getImageData(0, 0, video.videoWidth, video.videoHeight);
+                oCtx.drawImage(video, sx, sy, sw, sh, 0, 0, vw, vh);
+                const imageData = oCtx.getImageData(0, 0, vw, vh);
                 const res = decoderRef.current.decodeFrame(imageData);
 
                 setDebugInfo(res.debug || null);
@@ -980,14 +1078,29 @@ export default function App() {
                       <span className="w-2 h-2 bg-gray-600 rounded-full"></span> {t.camOffline}
                     </div>
                   )}
-                  <video ref={videoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover opacity-80"></video>
-                  <canvas ref={decCanvasRef} className="absolute inset-0 w-full h-full object-cover pointer-events-none z-10"></canvas>
-                  
-                  {isCameraOn && <div className="absolute top-4 left-4 flex flex-col gap-1 z-20">
-                    <div className={`text-[9px] font-mono px-2 py-0.5 uppercase border ${debugInfo?.detectedProfileId ? 'bg-pink-900/60 text-pink-200 border-pink-700' : 'bg-black/60 text-gray-400 border-gray-700'}`}>
-                      Sync: {debugInfo?.detectedProfileId ? t.syncLocked : t.syncSearching}
-                    </div>
-                  </div>}
+                   <video ref={videoRef} autoPlay playsInline className="absolute top-0 left-0 w-1 h-1 opacity-0 pointer-events-none z-0"></video>
+                   <canvas 
+                     ref={decCanvasRef} 
+                     onClick={triggerAutoFocus}
+                     className="absolute inset-0 w-full h-full object-cover z-10 cursor-crosshair"
+                     title="タップしてカメラのピントを合わせ直すお！💖"
+                   />
+                   
+                   {isCameraOn && (
+                     <div className="absolute top-4 left-4 flex flex-col gap-1 z-20 pointer-events-none">
+                       <div className={`text-[9px] font-mono px-2 py-0.5 uppercase border ${debugInfo?.detectedProfileId ? 'bg-pink-900/60 text-pink-200 border-pink-700' : 'bg-black/60 text-gray-400 border-gray-700'}`}>
+                         Sync: {debugInfo?.detectedProfileId ? t.syncLocked : t.syncSearching}
+                       </div>
+                     </div>
+                   )}
+
+                   {isCameraOn && (
+                     <div className="absolute top-4 right-4 flex flex-col gap-1 z-20 pointer-events-none">
+                       <div className="text-[9px] font-mono px-2 py-0.5 uppercase border bg-black/60 text-cyan-400 border-cyan-800/80 animate-pulse">
+                         👆 画面をタップしてピントリセット！✨
+                       </div>
+                     </div>
+                   )}
 
                   {/* 🔄 フィードバックコードの Picture-in-Picture レンダラー 🔄 */}
                   {(interactiveModeRx || showNackFeedbackRx) && (
@@ -1047,6 +1160,47 @@ export default function App() {
                     スライドショー（ARQ無効）中などに一部が欠落した時、これをONにして右下の極小(XS)フィードバックコードを送信カメラに写せば、**送信側が「欠落チャンクのみの繰り返し送信」に自動で切り替わります！**
                   </p>
                 </div>
+
+                {isCameraOn && (
+                  <div className="mt-3 p-3 bg-black/40 rounded border border-[#2d333d] flex flex-col gap-2 shrink-0">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-gray-200">
+                        🔍 カメラズーム {hardwareZoomSupported ? "(物理ハードズームお！✨)" : "(自律デジタル拡大お！💖)"}
+                      </span>
+                      <span className="text-xs font-mono text-pink-400 font-bold">{zoomVal.toFixed(1)}x</span>
+                    </div>
+                    
+                    <div className="flex items-center gap-3">
+                      <input 
+                        type="range" 
+                        min={zoomMin} 
+                        max={zoomMax} 
+                        step="0.1" 
+                        value={zoomVal} 
+                        onChange={(e) => handleZoomChange(parseFloat(e.target.value))}
+                        className="flex-1 accent-pink-500 h-1 bg-gray-800 rounded-lg appearance-none cursor-pointer"
+                      />
+                      <div className="flex gap-1 shrink-0">
+                        {[1.0, 1.5, 2.0].map(v => (
+                          <button
+                            key={v}
+                            onClick={() => handleZoomChange(v)}
+                            className={`px-2 py-1 text-[10px] font-mono rounded font-bold transition-all border cursor-pointer
+                              ${Math.abs(zoomVal - v) < 0.05 
+                                ? 'bg-pink-600 border-pink-500 text-white shadow-[0_0_8px_rgba(236,72,153,0.4)]' 
+                                : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'}`}
+                          >
+                            {v.toFixed(1)}x
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <p className="text-[9.5px] text-gray-400 italic leading-normal font-medium">
+                      💡 iOS/iPhoneでぼやける場合は、**ColorGridから20〜30cmほどカメラを離して、ズームを「1.5x」や「2.0x」にピッと設定する**とピントが爆速で合うよ！さらに、**画面タップで強制オートフォーカス再起動**もできるお！✨
+                    </p>
+                  </div>
+                )}
 
                 <div className="mt-3 shrink-0">
                   <button 

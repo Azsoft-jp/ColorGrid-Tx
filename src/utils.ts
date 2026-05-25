@@ -1,4 +1,4 @@
-import { GridProfile, GridProfileId } from "./types";
+import { GridProfile, GridProfileId, Point } from "./types";
 
 export const PALETTE_RGB = [
   { r: 0, g: 0, b: 0 },       // 0: black
@@ -47,6 +47,36 @@ export function getHeaderCellIndex(x: number, y: number, profile: GridProfile): 
   return -1;
 }
 
+export function getAlignmentCenters(size: number, profileId: GridProfileId): Point[] {
+  if (profileId === "XS") {
+    return [{ x: size - 6, y: size - 6 }];
+  }
+  const mid = Math.floor(size / 2);
+  if (profileId === "S") {
+    return [
+      { x: mid, y: mid },
+      { x: size - 6, y: size - 6 }
+    ];
+  }
+  if (profileId === "M") {
+    return [
+      { x: mid, y: mid },
+      { x: size - 6, y: mid },
+      { x: mid, y: size - 6 },
+      { x: size - 6, y: size - 6 }
+    ];
+  }
+  // L, XL
+  return [
+    { x: mid, y: mid },
+    { x: size - 6, y: mid },
+    { x: mid, y: size - 6 },
+    { x: size - 6, y: size - 6 },
+    { x: Math.floor(size * 0.33), y: Math.floor(size * 0.66) },
+    { x: Math.floor(size * 0.66), y: Math.floor(size * 0.33) }
+  ];
+}
+
 export function isReservedCell(x: number, y: number, profile: GridProfile): boolean {
   const G = profile.size;
   const F = profile.finderSize;
@@ -70,9 +100,13 @@ export function isReservedCell(x: number, y: number, profile: GridProfile): bool
   if (y === 6 && x >= 7 && x < G - 7) return true;
   if (x === 6 && y >= 7 && y < G - 7) return true;
 
-  // 右下アライメントパターン + 周囲セパレータ (7x7)
-  const apC = G - 6;
-  if (x >= apC - 3 && x <= apC + 3 && y >= apC - 3 && y <= apC + 3) return true;
+  // 複数アライメントパターン + 周囲セパレータ (7x7)
+  const apCenters = getAlignmentCenters(G, profile.id);
+  for (const ap of apCenters) {
+    if (x >= ap.x - 3 && x <= ap.x + 3 && y >= ap.y - 3 && y <= ap.y + 3) {
+      return true;
+    }
+  }
 
   // 基準パレット(8色): (F+1, 0) 〜 (F+8, 0)
   if (y === 0 && x >= F + 1 && x < F + 9) return true;
@@ -84,6 +118,44 @@ export function isReservedCell(x: number, y: number, profile: GridProfile): bool
   if (getHeaderCellIndex(x, y, profile) !== -1) return true;
 
   return false;
+}
+
+export function getColorGridMask(maskPattern: number, x: number, y: number): number {
+  switch (maskPattern) {
+    case 0: return (x + y) & 7;
+    case 1: return (x * 3 + y) & 7;
+    case 2: return (x + y * 3) & 7;
+    case 3: return (x * y) & 7;
+    case 4: return ((Math.floor(x / 2) + Math.floor(y / 3)) & 7);
+    case 5: return ((x * y + x + y) & 7);
+    case 6: return (((x * 5) ^ (y * 3)) & 7);
+    case 7: return (((x + y) * 3 + (x * y)) & 7);
+    default: return 0;
+  }
+}
+
+export interface BlockConfig {
+  dataSize: number;
+  paritySize: number;
+}
+
+export function getBlocksConfig(payloadLength: number): BlockConfig[] {
+  const MAX_BLOCK_DATA_SIZE = 96;
+  const blockCount = Math.ceil(payloadLength / MAX_BLOCK_DATA_SIZE);
+  if (blockCount <= 1) {
+    return [{ dataSize: payloadLength, paritySize: Math.ceil(payloadLength * 0.25) }];
+  }
+  const baseSize = Math.floor(payloadLength / blockCount);
+  const remainder = payloadLength % blockCount;
+  const configs: BlockConfig[] = [];
+  for (let b = 0; b < blockCount; b++) {
+    const dSize = baseSize + (b < remainder ? 1 : 0);
+    configs.push({
+      dataSize: dSize,
+      paritySize: Math.ceil(dSize * 0.25)
+    });
+  }
+  return configs;
 }
 
 /**
@@ -128,4 +200,50 @@ export function unpackFrom3Bit(data: Uint8Array, originalByteLength: number): Ui
     bitBuffer &= (1 << bitCount) - 1;
   }
   return out;
+}
+
+export type Unpack3BitResult = {
+  bytes: Uint8Array;
+  erasureBytePositions: number[];
+  erasureCellCount: number;
+};
+
+export function unpackFrom3BitWithErasures(values: number[], byteLen: number): Unpack3BitResult {
+  const out = new Uint8Array(byteLen);
+  const erasures = new Set<number>();
+  let erasureCellCount = 0;
+  let bitPos = 0;
+
+  for (const v of values) {
+    const byteA = Math.floor(bitPos / 8);
+    const byteB = Math.floor((bitPos + 2) / 8);
+
+    if (v < 0 || v > 7) {
+      erasureCellCount++;
+      if (byteA < byteLen) erasures.add(byteA);
+      if (byteB < byteLen) erasures.add(byteB);
+      bitPos += 3;
+      if (bitPos >= byteLen * 8) break;
+      continue;
+    }
+
+    for (let b = 2; b >= 0; b--) {
+      const bit = (v >> b) & 1;
+      const byteIndex = Math.floor(bitPos / 8);
+      const bitOffset = 7 - (bitPos % 8);
+      if (byteIndex < byteLen) {
+        out[byteIndex] |= bit << bitOffset;
+      }
+      bitPos++;
+      if (bitPos >= byteLen * 8) break;
+    }
+
+    if (bitPos >= byteLen * 8) break;
+  }
+
+  return {
+    bytes: out,
+    erasureBytePositions: [...erasures].sort((a, b) => a - b),
+    erasureCellCount
+  };
 }
