@@ -359,63 +359,40 @@ export class ColorGridDecoder {
       }
     }
 
-    let candidateProfiles: GridProfileId[] = [];
-
-    // --- 新しい距離ベースフィルタ ---
+    // --- ファインダー実測モジュールサイズからのグリッドサイズ(N)ダイレクト推定！✨ ---
+    // ファインダー走査時に 1:1:3:1:1 の実測幅から得た moduleSize（=1セルのpx幅）は
+    // ホモグラフィに依存しない一次情報なので、これでNを推定するのが最強に堅牢だお💖
+    // （旧タイミング事前走査は M(121) 前提の仮ホモグラフィだったため、S/XS/XLでは
+    //   タイミング行ではなくヘッダ行を走査してNを大幅誤推定 → 正解プロファイルを
+    //   候補から除外して全滅する致命バグがあった🥺 推定は並べ替えのみに使い、除外はしない！）
     const spanPx = Math.hypot(TR.x - TL.x, TR.y - TL.y);
-    const distanceFilteredProfiles: { pId: GridProfileId, cw: number }[] = [];
-    for (const pId of baseCandidates) {
-      const p = GRID_PROFILES[pId];
-      const cw = spanPx / (p.size - p.finderSize);
-      if (cw >= 1.8 && cw <= 24.0) {
-        distanceFilteredProfiles.push({ pId, cw });
+    const moduleSizes = [TL, TR, BL]
+      .map(p => (p as any).estimatedModuleSize as number | undefined)
+      .filter((v): v is number => typeof v === "number" && v > 0);
+    const moduleEst = moduleSizes.length > 0
+      ? moduleSizes.reduce((a, b) => a + b, 0) / moduleSizes.length
+      : -1;
+    const nModule = moduleEst > 0 ? spanPx / moduleEst + F_temp : -1;
+
+    const candidateProfiles: GridProfileId[] = [...baseCandidates];
+    if (nModule > 0) {
+      candidateProfiles.sort((a, b) =>
+        Math.abs(GRID_PROFILES[a].size - nModule) - Math.abs(GRID_PROFILES[b].size - nModule));
+    }
+    // 直前フレームで成功したプロファイルは最優先で試す！🚀
+    if (this.lastSuccessProfileId) {
+      const idx = candidateProfiles.indexOf(this.lastSuccessProfileId);
+      if (idx > 0) {
+        candidateProfiles.splice(idx, 1);
+        candidateProfiles.unshift(this.lastSuccessProfileId);
       }
     }
 
-    distanceFilteredProfiles.sort((a, b) => {
-      const fracA = Math.abs(a.cw - Math.round(a.cw));
-      const fracB = Math.abs(b.cw - Math.round(b.cw));
-      return fracA - fracB;
-    });
-
-    const distanceFallbackCandidates = distanceFilteredProfiles.length > 0
-      ? distanceFilteredProfiles.map(i => i.pId)
-      : [...baseCandidates];
-
-    // --- 元のロジックと統合 ---
-    let distanceUsedAsFallback = false;
-    if (estimatedN !== -1) {
-      // 推定Nとの差が±3以内のプロファイルのみ取り出すよ！✌️
-      const matched = (Object.keys(GRID_PROFILES) as GridProfileId[]).filter(pId => {
-        const size = GRID_PROFILES[pId].size;
-        return Math.abs(size - estimatedN) <= 3;
-      });
-
-      if (matched.length > 0) {
-        // 推定Nに最も近いプロファイルを1位にして並び替えるお！🚀
-        matched.sort((a, b) => {
-          const diffA = Math.abs(GRID_PROFILES[a].size - estimatedN);
-          const diffB = Math.abs(GRID_PROFILES[b].size - estimatedN);
-          return diffA - diffB;
-        });
-        candidateProfiles = matched;
-        timingLogDetail = `timing: ${transitions}transitions, estimatedN=${estimatedN}, candidates=[${candidateProfiles.join(", ")}]`;
-      } else {
-        candidateProfiles = distanceFallbackCandidates;
-        distanceUsedAsFallback = true;
-      }
-    } else {
-      candidateProfiles = distanceFallbackCandidates;
-      distanceUsedAsFallback = true;
-    }
-
-    if (distanceUsedAsFallback) {
-      timingLogDetail = `timing: failed/fallback, distance fallback: candidates=[${candidateProfiles.join(", ")}]`;
-    }
+    timingLogDetail = `timing(diag): ${transitions}transitions, estimatedN=${estimatedN} | moduleEst=${moduleEst.toFixed(2)}px → N≈${nModule.toFixed(1)} → candidates=[${candidateProfiles.join(", ")}]`;
 
     phaseLogs.push({
       phase: "timing",
-      ok: estimatedN !== -1,
+      ok: nModule > 0,
       detail: timingLogDetail,
       durationMs: performance.now() - timingStart
     });
@@ -536,20 +513,9 @@ export class ColorGridDecoder {
         durationMs: homographyDuration
       });
 
-      // 📐 セルサイズに応じた超インテリジェンスな段階的サンプリング半径の動的判定お！💖
-      let sampleRadius = 0;
-      if (cellWidth < 6) {
-        sampleRadius = 0;
-      } else if (cellWidth <= 12) {
-        sampleRadius = 1;
-      } else {
-        sampleRadius = 2;
-      }
-      // セル中央25%領域を超えないように鬼上限キャップをかけるよ！✨
-      const maxRadius = Math.floor(cellWidth * 0.25);
-      if (sampleRadius > maxRadius) {
-        sampleRadius = maxRadius;
-      }
+      // 📐 セルサイズに応じたサンプリング半径：セル中央25%領域を超えない範囲で最大限に取る！
+      // 小さいセルほどノイズに弱いので、cw>=4pxなら3x3メディアン、cw>=8pxなら5x5メディアンを使うお💖
+      const sampleRadius = Math.min(2, Math.floor(cellWidth * 0.25));
 
       // 複数アライメントパターン(AP)の検出
       const isIdealBlack = (dx: number, dy: number): boolean => {
@@ -569,7 +535,8 @@ export class ColorGridDecoder {
 
         for (let dy = -2; dy <= 2; dy++) {
           for (let dx = -2; dx <= 2; dx++) {
-            const pt = perspectiveTransform({ x: ap.x + sx + dx, y: ap.y + sy + dy }, mat);
+            // セル(ap.x+dx, ap.y+dy) の「中心」は +0.5 した連続座標！ここを外すと常に半セルずれるお🥺
+            const pt = perspectiveTransform({ x: ap.x + 0.5 + sx + dx, y: ap.y + 0.5 + sy + dy }, mat);
             const col = this.sampleColor(imageData, pt.x, pt.y, sampleRadius);
             if (!col) continue;
 
@@ -639,8 +606,8 @@ export class ColorGridDecoder {
         }
 
         if (bestContrast !== -Infinity && bestContrast > 10) {
-          const paraPt = perspectiveTransform(ap, mat);
-          const realPt = perspectiveTransform({ x: ap.x + bestShiftX, y: ap.y + bestShiftY }, mat);
+          const paraPt = perspectiveTransform({ x: ap.x + 0.5, y: ap.y + 0.5 }, mat);
+          const realPt = perspectiveTransform({ x: ap.x + 0.5 + bestShiftX, y: ap.y + 0.5 + bestShiftY }, mat);
           const offset = {
             dx: realPt.x - paraPt.x,
             dy: realPt.y - paraPt.y
@@ -665,7 +632,7 @@ export class ColorGridDecoder {
         const dstPointsAP = [
           { x: centerOff, y: centerOff },
           { x: N - centerOff, y: centerOff },
-          { x: N - 6, y: N - 6 },
+          { x: N - 6 + 0.5, y: N - 6 + 0.5 }, // realPtはAPセル「中心」の実測位置なので +0.5 の連続座標とペアリング！
           { x: centerOff, y: N - centerOff },
         ];
         const srcPointsAP = [
@@ -677,6 +644,12 @@ export class ColorGridDecoder {
         const matAP = getPerspectiveTransform(dstPointsAP, srcPointsAP);
         if (matAP) {
           mat = matAP;
+          // matが変わったので、各APのオフセットを新matに対する残差として再計算！
+          // （旧matとの残差のまま使うと、BR補正分が二重適用されて右下が2倍ズレるお🥺）
+          for (const item of detectedAPs) {
+            const p = perspectiveTransform({ x: item.theory.x + 0.5, y: item.theory.y + 0.5 }, mat);
+            item.offset = { dx: item.real.x - p.x, dy: item.real.y - p.y };
+          }
         }
       }
 
@@ -993,7 +966,14 @@ export class ColorGridDecoder {
 
         let currentSampleRadius = sampleRadius;
         if (cellWidth < 6.0) {
-          pts = [{ x: x_center + 0.5, y: 0.5 }];
+          // 極小セルでも1点きりだとノイズ1発で即死なので、±0.2セルの5点クロス＋メディアンで守るお🥺
+          pts = [
+            { x: x_center + 0.5, y: 0.5 }, // 中心
+            { x: x_center + 0.5, y: 0.3 }, // 上
+            { x: x_center + 0.5, y: 0.7 }, // 下
+            { x: x_center + 0.3, y: 0.5 }, // 左
+            { x: x_center + 0.7, y: 0.5 }  // 右
+          ];
           currentSampleRadius = 0;
         } else if (cellWidth < 9.0) {
           pts = [
@@ -1099,6 +1079,9 @@ export class ColorGridDecoder {
         });
       }
 
+      // パレット実測値から適応閾値をこのフレーム用に1回だけ構築！✨
+      const colorTh = this.buildColorThresholds(readPalette);
+
       // 同期クロック（v1.5.0からは、曖昧・失敗してもデコード続行する超高可用性フォールバック仕様！）
       const clockStart = performance.now();
       const clockPt = getCorrectedPt(F + 1 + 0.5, 1.5);
@@ -1116,7 +1099,7 @@ export class ColorGridDecoder {
         });
         log.push(`${pId}: clock read failed (fallback logic engaged)`);
       } else {
-        const measuredClockVal = this.matchColor(clockCol, readPalette);
+        const measuredClockVal = this.matchColor(clockCol, readPalette, colorTh);
         const clockDetail = `[${pId}] clockVal: ${measuredClockVal}, lastClockValueとの比較: (本フレーム: ${measuredClockVal}, 前フレーム: ${this.lastClockValue})`;
 
         if (measuredClockVal === -1) {
@@ -1159,7 +1142,7 @@ export class ColorGridDecoder {
             const col = this.sampleColor(imageData, pt.x, pt.y, sampleRadius);
             if (!col) { headerOk = false; break; }
 
-            const mCol = this.matchColor(col, readPalette);
+            const mCol = this.matchColor(col, readPalette, colorTh);
             if (hIdx < 5) {
                 let logStr = `header[${hIdx}] pos(${pt.x.toFixed(1)},${pt.y.toFixed(1)}) rgb(${col.r},${col.g},${col.b}) → matchColor=${mCol}`;
                 if (hIdx < 3) {
@@ -1300,7 +1283,7 @@ export class ColorGridDecoder {
             }
             
             const col = this.sampleColor(imageData, pt.x, pt.y, sampleRadius);
-            const rawVal = col ? this.matchColor(col, readPalette) : -1;
+            const rawVal = col ? this.matchColor(col, readPalette, colorTh) : -1;
             
             // 新仕様: マスク適用時は XOR 逆マスク！✨
             const currentVal = (rawVal === -1) ? -1 : ((magic === 0xC7) ? (rawVal ^ getColorGridMask(maskPattern, x, y)) : rawVal);
@@ -1679,8 +1662,18 @@ export class ColorGridDecoder {
       }
       
       const r = data[i], g = data[i+1], b = data[i+2];
+
+      // 強い有彩色（青・シアン等のカラーデータセル）は「黒」扱いしない！
+      // 固定閾値(>80)は白の色被りを誤爆したので、max成分に対する相対彩度で判定するお✨
+      // 白の色被り: chroma小/max大 → 通過。純色データセル: chroma≈max → 黒から除外。
+      const maxCh = Math.max(r, g, b);
+      const chroma = maxCh - Math.min(r, g, b);
+      if (chroma > Math.max(48, maxCh * 0.45)) {
+        return false;
+      }
+
       const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-      
+
       return luma < th;
     };
 
@@ -1699,6 +1692,10 @@ export class ColorGridDecoder {
     const levels = [
       { name: "lv1 (factor 0.65)", factor: 0.65, label: "lv1" },
       { name: "lv2 (factor 0.85)", factor: 0.85, label: "lv2" },
+      // lv3はかつて背景ノイズ誘発で撤廃したけど、クラスタのメディアン外れ点除去＆
+      // 相対彩度ガード＆L字全探索スコアリングが入った今なら安全に復活できるお！
+      // 強ボケ・極小セル（cw≒2.5px）でのファインダー救済用だよ🥺💖
+      { name: "lv3 (factor 1.15)", factor: 1.15, label: "lv3" },
     ];
 
     let levelResultsStr = "";
@@ -1893,6 +1890,9 @@ export class ColorGridDecoder {
         (this as any).filterA = condACount;
         (this as any).filterB = condBCount;
         (this as any).filterRemain = remainCount;
+        // 3クラスタ確保できたレベルで即確定！残りの緩いレベルを走査しない分、
+        // フレームあたりのファインダー探索コストを最大1/3にカットするお🚀
+        break;
       } else if (adoptedLevel === -1) {
         finalCenters = centers;
         finalClusters = targetClusters;
@@ -1911,10 +1911,28 @@ export class ColorGridDecoder {
 
     this.ratioCheckLog = `ratio check: ${levelResultsStr} → merged=${finalClusters.length}clusters`;
 
+    const median = (vals: number[]): number => {
+      const s = [...vals].sort((a, b) => a - b);
+      return s[Math.floor(s.length / 2)];
+    };
+
     const merged = finalClusters.map(cluster => {
-      const sumX = cluster.reduce((a, b) => a + b.x, 0);
-      const sumY = cluster.reduce((a, b) => a + b.y, 0);
-      return { x: sumX / cluster.length, y: sumY / cluster.length };
+      // 平均（重心）はデータ領域から紛れ込んだ偽ファインダー点に引っ張られて
+      // 数px〜十数pxズレることがあるので、メディアン基準で外れ点を落としてから平均するお🥺💖
+      const medX = median(cluster.map(p => p.x));
+      const medY = median(cluster.map(p => p.y));
+      const medM = median(cluster.map(p => p.estimatedModuleSize));
+      const inlierRadius = Math.max(medM * 2.5, 6);
+      const inliers = cluster.filter(p =>
+        Math.hypot(p.x - medX, p.y - medY) <= inlierRadius &&
+        p.estimatedModuleSize <= medM * 1.6 && p.estimatedModuleSize >= medM * 0.6
+      );
+      const use = inliers.length >= Math.max(2, cluster.length * 0.3) ? inliers : cluster;
+      const sumX = use.reduce((a, b) => a + b.x, 0);
+      const sumY = use.reduce((a, b) => a + b.y, 0);
+      const sumM = use.reduce((a, b) => a + b.estimatedModuleSize, 0);
+      // estimatedModuleSize はプロファイル(グリッドサイズN)推定に使う一次情報として同梱！✨
+      return { x: sumX / use.length, y: sumY / use.length, estimatedModuleSize: sumM / use.length };
     });
 
     return merged;
@@ -2218,19 +2236,45 @@ export class ColorGridDecoder {
     };
   }
 
+  /**
+   * パレット8色の実測値から、チャンネル閾値＆適応マージンを事前計算するよ！✨
+   * - 閾値: 各チャンネルの「そのビットが0の4色の平均」と「1の4色の平均」の中点。
+   *   2色だけからの推定に比べてノイズが1/√2以下に減って超安定！
+   * - マージン: 実測コントラスト幅(hi-lo)に比例させる。暗い映像やコントラストが
+   *   潰れた映像で固定マージン24が広すぎて消失(-1)だらけになるのを防ぐお🥺💖
+   */
+  private buildColorThresholds(palette: { r: number; g: number; b: number }[]) {
+    const avg = (idxs: number[], ch: "r" | "g" | "b") =>
+      idxs.reduce((s, i) => s + palette[i][ch], 0) / idxs.length;
+
+    // ビット対応: index = R(bit2) G(bit1) B(bit0)
+    const loR = avg([0, 1, 2, 3], "r"), hiR = avg([4, 5, 6, 7], "r");
+    const loG = avg([0, 1, 4, 5], "g"), hiG = avg([2, 3, 6, 7], "g");
+    const loB = avg([0, 2, 4, 6], "b"), hiB = avg([1, 3, 5, 7], "b");
+
+    const clampMargin = (range: number) => Math.min(24, Math.max(6, range * 0.12));
+
+    return {
+      thR: (loR + hiR) / 2,
+      thG: (loG + hiG) / 2,
+      thB: (loB + hiB) / 2,
+      mR: clampMargin(hiR - loR),
+      mG: clampMargin(hiG - loG),
+      mB: clampMargin(hiB - loB),
+      nnMargin: Math.min(18, Math.max(8, ((hiR - loR) + (hiG - loG) + (hiB - loB)) / 3 * 0.09)),
+    };
+  }
+
   private matchColor(
     col: { r: number; g: number; b: number },
-    palette: { r: number; g: number; b: number }[]
+    palette: { r: number; g: number; b: number }[],
+    th?: ReturnType<ColorGridDecoder["buildColorThresholds"]>
   ): number {
-    const thR = (palette[0].r + palette[4].r) / 2;
-    const thG = (palette[0].g + palette[2].g) / 2;
-    const thB = (palette[0].b + palette[1].b) / 2;
+    const t = th ?? this.buildColorThresholds(palette);
 
-    const margin = 24;
-
-    const ambR = Math.abs(col.r - thR) <= margin;
-    const ambG = Math.abs(col.g - thG) <= margin;
-    const ambB = Math.abs(col.b - thB) <= margin;
+    const ambR = Math.abs(col.r - t.thR) <= t.mR;
+    const ambG = Math.abs(col.g - t.thG) <= t.mG;
+    const ambB = Math.abs(col.b - t.thB) <= t.mB;
 
     const ambiguousChannels = Number(ambR) + Number(ambG) + Number(ambB);
 
@@ -2241,9 +2285,9 @@ export class ColorGridDecoder {
     }
 
     const cubeIdx =
-      (col.r > thR ? 4 : 0) |
-      (col.g > thG ? 2 : 0) |
-      (col.b > thB ? 1 : 0);
+      (col.r > t.thR ? 4 : 0) |
+      (col.g > t.thG ? 2 : 0) |
+      (col.b > t.thB ? 1 : 0);
 
     // 最近傍との整合性チェック
     let minDist = Infinity;
@@ -2266,7 +2310,7 @@ export class ColorGridDecoder {
     }
 
     // cube判定と最近傍が割れて、距離差も小さいなら曖昧
-    if (cubeIdx !== minIdx && secondDist - minDist < 18) {
+    if (cubeIdx !== minIdx && secondDist - minDist < t.nnMargin) {
       return -1;
     }
 
